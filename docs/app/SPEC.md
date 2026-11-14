@@ -73,7 +73,10 @@ Links on each card:
 
 Shown at the bottom of page 2, only when I press a button.
 
-- `plan_journey` with connections set to `"always"`, through up to 3 change stations.
+- `plan_journey` with connections set to `"always"`, through the 5 best-connected change stations on the way (`hub_selection: "well_connected"`), including trains from the other main terminals of the origin and destination cities (`include_city_terminals`, a fixed list such as NDLS, DLI, NZM, ANVT, DEE for Delhi). Up to 12 options are shown.
+- A choice of waiting time at the change: 2 to 10 hours (default) or up to 15 hours (overnight), remembered.
+- Before running, the section shows roughly how many live checks a press uses.
+- When no direct train has confirmed seats in the searched classes (or none runs), a prompt above the train list offers to find other ways; it runs only when pressed.
 - Up to 3 nearby destination stations that I pick myself with autocomplete. My picks are remembered per destination.
 
 Each option shows:

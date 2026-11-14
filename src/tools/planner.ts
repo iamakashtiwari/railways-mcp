@@ -1,6 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { findConnections, type Journey } from "../core/connections.js";
+import { detourRatio, rankHubs, type HubCandidate } from "../core/hubs.js";
+import { cityTerminals } from "../core/terminals.js";
 import { RailError, isRailError } from "../core/errors.js";
 import { DEFAULT_CLASS_ORDER, bestClass, directOptions, makeOption, rankOptions, toLeg, type TravelOption } from "../core/planner.js";
 import { addDays, parseClock, todayInIndia } from "../core/time.js";
@@ -66,7 +68,7 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
     {
       title: "Plan a journey from live availability",
       description:
-        "Ranks ways to travel between two stations on a date using live availability: direct trains, optional alternative destination stations, and journeys with one change of train taken from the timetable, each leg checked live. Order: direct confirmed, connection with every leg confirmed, alternative destination confirmed, direct RAC, connection RAC, direct waitlist (smaller number first), then the rest. Each option lists its legs with class, status, fare and boarding date, the total fare, and for connections the change station and scheduled layover. A connection is two separate tickets: a delay on the first train does not protect the second. Each route read costs one page read on the operator's Firecrawl key; lookups_used reports how many were made. Requires the opt-in railyatri source.",
+        "Ranks ways to travel between two stations on a date using live availability: direct trains, optional alternative destination stations, and journeys with one change of train taken from the timetable, each leg checked live. Order: direct confirmed, connection with every leg confirmed, alternative destination confirmed, direct RAC, connection RAC, direct waitlist (smaller number first), then the rest. Each option lists its legs with class, status, fare and boarding date, the total fare, and for connections the change station and scheduled layover. A connection is two separate tickets: a delay on the first train does not protect the second. Change stations are chosen either fastest-journey first (default) or, with hub_selection well_connected, by how many trains run from the origin to the station and on to the destination, excluding stations well off the way; considered.change_stations lists the ones checked. With include_city_terminals, journeys may also start or end at the other main terminals of the same city (for example Anand Vihar or Old Delhi for New Delhi); those legs are read live from the requested stations' pages, which list nearby terminals. Each route read costs one page read on the operator's Firecrawl key; lookups_used reports how many were made. Requires the opt-in railyatri source.",
       inputSchema: {
         from: stationCode,
         to: stationCode,
@@ -82,6 +84,16 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
           .default("auto")
           .describe("auto: check one-change journeys only when no direct train has a confirmed seat"),
         max_change_stations: z.number().int().min(1).max(5).default(3).describe("Distinct change stations to check live"),
+        hub_selection: z
+          .enum(["fastest", "well_connected"])
+          .default("fastest")
+          .describe(
+            "fastest: change stations of the fastest timetable journeys; well_connected: on-the-way stations with the most trains on both legs",
+          ),
+        include_city_terminals: z
+          .boolean()
+          .default(false)
+          .describe("Also plan connections from and to the other main terminals of the origin's and destination's cities"),
         min_layover_minutes: z.number().int().min(30).max(600).default(120),
         max_layover_minutes: z.number().int().min(60).max(1440).default(600),
         limit: z.number().int().min(1).max(30).default(10),
@@ -123,26 +135,102 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
 
       const directConfirmed = options.some((o) => o.kind === "direct" && o.worst_category === "available");
       let checkedConnections = 0;
+      let changeStations: Array<Record<string, unknown>> = [];
       if (a.connections === "always" || (a.connections === "auto" && !directConfirmed)) {
         const tt = ctx.timetables.find((t) => t.callsAt(from, a.date).length > 0 && t.callsAt(to, a.date).length > 0);
         if (!tt) {
           notes.push(`No timetable has trains at both ${from} and ${to}; connections were not searched.`);
         } else {
-          const found = findConnections(tt.onDate(a.date), {
-            from,
-            to,
-            maxLegs: 2,
-            minLayoverMinutes: a.min_layover_minutes,
-            maxLayoverMinutes: a.max_layover_minutes,
-            date: a.date,
-            limit: 20,
-          });
-          const hubs: string[] = [];
-          for (const j of found.journeys) {
-            const hub = j.transfers[0]?.station_code;
-            if (hub && !hubs.includes(hub) && hubs.length < a.max_change_stations) hubs.push(hub);
+          const known = (c: string) => tt.hasStation(c);
+          const origins = a.include_city_terminals ? cityTerminals(from, known) : [from];
+          const dests = a.include_city_terminals ? cityTerminals(to, known) : [to];
+          const wellConnected = a.hub_selection === "well_connected";
+          // One local timetable search per terminal pair; merged and fastest first.
+          const seen = new Set<string>();
+          const all: Journey[] = [];
+          for (const o of origins) {
+            for (const d of dests) {
+              if (o === d) continue;
+              const r = findConnections(tt.onDate(a.date), {
+                from: o,
+                to: d,
+                maxLegs: 2,
+                minLayoverMinutes: a.min_layover_minutes,
+                maxLayoverMinutes: a.max_layover_minutes,
+                date: a.date,
+                limit: wellConnected ? 200 : 20,
+              });
+              for (const j of r.journeys) {
+                const hub = j.transfers[0]?.station_code;
+                // changing at another terminal of the same city is not a real alternative
+                if (!hub || origins.includes(hub) || dests.includes(hub)) continue;
+                const key = j.legs.map((l) => `${l.train_number}@${l.from_code}>${l.to_code}`).join("|");
+                if (seen.has(key)) continue;
+                seen.add(key);
+                all.push(j);
+              }
+            }
           }
-          const journeys = found.journeys.filter((j) => hubs.includes(j.transfers[0]?.station_code ?? ""));
+          all.sort((x, y) => x.total_minutes - y.total_minutes);
+
+          const hubs: string[] = [];
+          const hubInfo: Array<Pick<HubCandidate, "code" | "first_leg_trains" | "onward_trains" | "detour">> = [];
+          if (!wellConnected) {
+            for (const j of all) {
+              const hub = j.transfers[0]!.station_code;
+              if (!hubs.includes(hub) && hubs.length < a.max_change_stations) hubs.push(hub);
+            }
+          } else {
+            const pos = new Map(
+              tt
+                .allStations()
+                .filter((st) => st.lat !== null && st.lon !== null)
+                .map((st) => [st.code, [st.lat!, st.lon!] as const]),
+            );
+            const trainSet = async (fs: string[], ts: string[], dates: string[]) => {
+              const set = new Set<string>();
+              for (const f of fs)
+                for (const t of ts)
+                  for (const d of dates) for (const l of await tt.trainsBetween({ from: f, to: t, date: d })) set.add(l.train_number);
+              return set.size;
+            };
+            const byHub = new Map<string, Journey[]>();
+            for (const j of all) {
+              const hub = j.transfers[0]!.station_code;
+              byHub.set(hub, [...(byHub.get(hub) ?? []), j]);
+            }
+            const candidates: HubCandidate[] = [];
+            for (const [hub, js] of byHub) {
+              candidates.push({
+                code: hub,
+                journeys: js.length,
+                first_leg_trains: await trainSet(origins, [hub], [a.date]),
+                onward_trains: await trainSet([hub], dests, [a.date, addDays(a.date, 1)]),
+                detour: detourRatio(pos.get(from) ?? null, pos.get(hub) ?? null, pos.get(to) ?? null),
+                fastest_minutes: js[0]!.total_minutes,
+              });
+            }
+            for (const h of rankHubs(candidates).slice(0, a.max_change_stations)) {
+              hubs.push(h.code);
+              hubInfo.push({
+                code: h.code,
+                first_leg_trains: h.first_leg_trains,
+                onward_trains: h.onward_trains,
+                detour: h.detour === null ? null : Math.round(h.detour * 100) / 100,
+              });
+            }
+          }
+          changeStations = wellConnected ? hubInfo : hubs.map((code) => ({ code }));
+          // Well-connected mode checks the fastest few journeys per hub; reads are shared, so the cost is per route and date.
+          const perHub = new Map<string, number>();
+          const journeys = all.filter((j) => {
+            const hub = j.transfers[0]!.station_code;
+            if (!hubs.includes(hub)) return false;
+            if (!wellConnected) return true;
+            const n = perHub.get(hub) ?? 0;
+            perHub.set(hub, n + 1);
+            return n < 6;
+          });
           checkedConnections = journeys.length;
           const legDate = (j: Journey, i: number): string => {
             const start = parseClock(j.legs[0]!.departure.time) ?? 0;
@@ -153,7 +241,10 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
               const legs = await Promise.all(
                 j.legs.map(async (l, i) => {
                   const d = legDate(j, i);
-                  const r = await read(l.from_code, l.to_code, d);
+                  // The requested stations' pages list trains from their city's other terminals too.
+                  const rf = i === 0 && origins.includes(l.from_code) ? from : l.from_code;
+                  const rt = i === j.legs.length - 1 && dests.includes(l.to_code) ? to : l.to_code;
+                  const r = await read(rf, rt, d);
                   const t = r?.trains.find((x) => x.train_number === l.train_number && x.runs_on_date);
                   const c = t ? bestClass(t, classes) : null;
                   return t && c ? toLeg(t, c, d) : null;
@@ -173,7 +264,7 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
             notes.push(
               `${journeys.length - usable.length} of ${journeys.length} timetable connections had a leg with no listed, bookable class in the requested classes.`,
             );
-          if (!found.journeys.length) notes.push("The timetable has no one-change journeys within the layover limits on this date.");
+          if (!all.length) notes.push("The timetable has no one-change journeys within the layover limits on this date.");
         }
       }
 
@@ -189,6 +280,7 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
         considered: {
           direct_and_alternative_options: options.filter((o) => o.kind !== "connection").length,
           connections_checked: checkedConnections,
+          change_stations: changeStations,
         },
         lookups_used: reads.size,
         verification: VOLATILE,

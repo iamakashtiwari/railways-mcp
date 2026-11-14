@@ -43,7 +43,7 @@ Design documentation, with C4, UML sequence/class/deployment and flowchart diagr
 | `find_connections` | Journeys of 2–3 trains with layover bounds, `via`, max total time and running-day compatibility (`works_on`). Pointless changes are removed |
 | `get_punctuality` | Delay history per station over 1w/1m/3m/6m/1y: runs counted, period, average/median/max delay, share within 15 min, over 30 min and over 60 min. Cross-checked between sources within ±10 min |
 | `get_route_availability` | **Live** availability for every train and class on a route and date in one call: status, seat/RAC/waitlist number, fare, confirmation-chance label (needs `railyatri`) |
-| `plan_journey` | Ranks direct trains, alternative destinations and one-change journeys by **live** availability: confirmed direct → confirmed connection → confirmed alternative destination → RAC → waitlist (smallest first). Each connection leg is checked live on its own boarding date (needs `railyatri`) |
+| `plan_journey` | Ranks direct trains, alternative destinations and one-change journeys by **live** availability: confirmed direct → confirmed connection → confirmed alternative destination → RAC → waitlist (smallest first). Each connection leg is checked live on its own boarding date. Change stations: fastest journeys first, or `hub_selection: "well_connected"` (on-the-way stations with the most trains on both legs); `include_city_terminals` also plans from and to a city's other main terminals (needs `railyatri`) |
 | `get_seat_availability` | Availability per class and quota (needs an availability source) |
 | `get_fare` | Fares per class and quota (needs a fare source) |
 | `get_data_sources` | Active sources, freshness, disabled capabilities, today's date in IST |
@@ -104,7 +104,7 @@ A small search page for live seat availability that runs only on your own comput
 
 - **Search:** From and To with station autocomplete, a swap button, date chips (today and the next 5 days) plus a date picker, class chips (remembered), and your last 6 searches.
 - **Results:** every train on the route for the date, with one box per class: green available, amber RAC, red waitlist, grey regret or not loaded, with fare and confirmation chance. Confirmed seats sort first, then the smallest RAC or waitlist number, then departure time. A 7-day row moves between dates and shows "N open" under dates you've already checked that had confirmed seats. "Seats only" and "All classes" filter the list; links go to IRCTC and the RailYatri page.
-- **Other ways to go** (only when you press the button): `plan_journey` with one-change journeys through up to 3 change stations, plus up to 3 nearby destination stations that **you** add (they are never picked automatically). Each option shows its legs, total fare and, for connections, that they are two separate tickets.
+- **Other ways to go** (only when you press the button, or the "no confirmed seats" prompt): `plan_journey` with one-change journeys through the 5 best-connected change stations on the way (for Delhi → Chhapra: Gorakhpur, Prayagraj, Varanasi and similar, not stations off the route), including trains from the city's other main terminals (Anand Vihar, Old Delhi and so on), with a choice of 2–10 h or overnight waits, plus up to 3 nearby destination stations that **you** add (they are never picked automatically). Each option shows its legs, total fare and, for connections, that they are two separate tickets.
 
 ### Set up and run
 
@@ -134,7 +134,7 @@ npm run build && node --env-file=.env dist/src/app.js
 
 ### Cost
 
-Each live check is one Firecrawl page read on your key. Opening a results page is one check (repeats within 90 seconds come from the cache). "Other ways to go" reads every route it considers, typically around 10 checks per press. The header shows today's count, and the app refuses further live checks once the daily cap is reached. The count is saved to `.app-state/live-checks.json`, so restarting the app does not reset it.
+Each live check is one Firecrawl page read on your key. Opening a results page is one check (repeats within 90 seconds come from the cache). "Other ways to go" reads every route it considers, usually 10–15 checks per press; the section shows an estimate first. The header shows today's count, and the app refuses further live checks once the daily cap is reached. The count is saved to `.app-state/live-checks.json`, so restarting the app does not reset it.
 
 ### Safety
 

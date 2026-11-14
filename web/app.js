@@ -5,7 +5,14 @@ const CLASSES = ["1A", "2A", "3A", "3E", "SL", "CC", "2S"];
 const DEFAULT_CLASSES = ["3A", "2A", "1A"];
 const DEBOUNCE_MS = 160;
 const RECENT_MAX = 6;
-const KEYS = { classes: "rsf.classes", recent: "rsf.recent", stations: "rsf.stations", coords: "rsf.coords", nearby: "rsf.nearby" };
+const KEYS = {
+  classes: "rsf.classes",
+  recent: "rsf.recent",
+  stations: "rsf.stations",
+  coords: "rsf.coords",
+  nearby: "rsf.nearby",
+  overnight: "rsf.overnight",
+};
 
 // ---------- small helpers ----------
 
@@ -110,10 +117,12 @@ const callTool = (name, args, signal) => api(`tools/${name}`, { body: args, sign
 // ---------- header: live checks counter ----------
 
 let liveUsed = null;
+let liveLimit = null;
 
 function showLiveChecks(lc) {
   const used = Number(lc.used);
   if (Number.isFinite(used)) liveUsed = used;
+  if (Number.isFinite(Number(lc.limit))) liveLimit = Number(lc.limit);
   const limit = Number(lc.limit);
   if (!Number.isFinite(used) || !Number.isFinite(limit)) return;
   const node = $("live-count");
@@ -697,6 +706,7 @@ function startLoading() {
   $("loading").hidden = false;
   $("results-error").hidden = true;
   $("results-empty").hidden = true;
+  $("no-seats").hidden = true;
   $("train-list").replaceChildren();
   $("status-line").textContent = "Checking…";
   setBusy(true);
@@ -729,7 +739,15 @@ function errorCard(e, onRetry) {
   return card;
 }
 
+/** The "no seats" prompt above the train list; null hides it. */
+function showNoSeats(title) {
+  const box = $("no-seats");
+  box.hidden = !title;
+  if (title) $("no-seats-title").textContent = title;
+}
+
 function showError(e) {
+  if (e && e.code === "NOT_FOUND") showNoSeats("No direct trains on this date");
   const card = errorCard(e, () => loadResults(true));
   const box = $("results-error");
   box.replaceChildren(card);
@@ -848,6 +866,7 @@ function renderResults() {
   const shown = (results.seatsOnly ? withSeats : all).slice().sort(compareTrains);
   const list = $("train-list");
   list.replaceChildren(...shown.map((t) => trainCard(t, searched)));
+  showNoSeats(all.length > 0 && withSeats.length === 0 ? `No confirmed seats in ${r.classes.join(" ")} on direct trains` : null);
   const empty = $("results-empty");
   empty.hidden = shown.length > 0;
   if (!shown.length) {
@@ -979,6 +998,7 @@ function renderNearby() {
     li.append(toggle, remove);
     box.append(li);
   }
+  renderOtherCost();
   $("nearby-help").textContent = list.length
     ? `${onCount} of ${NEARBY_MAX_ON} selected. Selected stations are checked as destinations instead of ${knownStationName(r.to) || r.to}.`
     : `None added. Add up to ${NEARBY_MAX_ON} stations near ${knownStationName(r.to) || r.to} to check them as destinations too.`;
@@ -1095,15 +1115,30 @@ async function findOtherWays() {
     .filter((s) => s.on)
     .slice(0, NEARBY_MAX_ON)
     .map((s) => s.code);
-  const args = { from: r.from, to: r.to, date: r.date, classes: r.classes, connections: "always", max_change_stations: 3, limit: 12 };
+  const args = {
+    from: r.from,
+    to: r.to,
+    date: r.date,
+    classes: r.classes,
+    connections: "always",
+    max_change_stations: HUBS_CHECKED,
+    hub_selection: "well_connected",
+    include_city_terminals: true,
+    // direct trains are already listed above, so ask for room to show 12 others
+    limit: 30,
+  };
+  if (load(KEYS.overnight, false) === true) args.max_layover_minutes = OVERNIGHT_MAX_WAIT;
   if (alts.length) args.alternative_destinations = alts;
 
   try {
     const data = await callTool("plan_journey", args, other.controller.signal);
     if (mine !== other.seq) return;
     finishOther();
-    const options = (data && Array.isArray(data.options) ? data.options : []).filter((o) => o && o.kind !== "direct");
-    const hubs = options.filter((o) => o.kind === "connection" && o.transfer).map((o) => o.transfer.station_code);
+    const options = (data && Array.isArray(data.options) ? data.options : []).filter((o) => o && o.kind !== "direct").slice(0, 12);
+    const via = (data && data.considered && Array.isArray(data.considered.change_stations) ? data.considered.change_stations : [])
+      .map((h) => h && h.code)
+      .filter(isCode);
+    const hubs = [...via, ...options.filter((o) => o.kind === "connection" && o.transfer).map((o) => o.transfer.station_code)];
     $("option-list").replaceChildren(...options.map((o) => optionCard(o, r.to)));
     // change-station names for the badges, looked up once
     const unknown = [...new Set(hubs)].filter((c) => !knownStationName(c));
@@ -1118,23 +1153,31 @@ async function findOtherWays() {
             .catch(() => {}),
         ),
       ).then(() => {
-        if (mine === other.seq) $("option-list").replaceChildren(...options.map((o) => optionCard(o, r.to)));
+        if (mine !== other.seq) return;
+        $("option-list").replaceChildren(...options.map((o) => optionCard(o, r.to)));
+        renderSummary();
       });
     }
 
     const used = usedBefore !== null && liveUsed !== null ? liveUsed - usedBefore : null;
-    const parts = [
-      options.length ? `${options.length} other ${options.length === 1 ? "way" : "ways"} found` : "No other ways found in these classes",
-      used === null ? null : `used ${used} live ${used === 1 ? "check" : "checks"}`,
-      typeof data.lookups_used === "number" ? `${data.lookups_used} routes read` : null,
-    ].filter(Boolean);
     const problems = (Array.isArray(data.notes) ? data.notes : []).filter(
       (n) => typeof n === "string" && /^(Could not read|No timetable|The timetable has no|\d+ of \d+ timetable connections)/.test(n),
     );
-    const summary = $("other-summary");
-    summary.replaceChildren(document.createTextNode(parts.join(" · ") + "."));
-    for (const n of problems) summary.append(el("br"), document.createTextNode(n));
-    summary.hidden = false;
+    function renderSummary() {
+      const parts = [
+        options.length ? `${options.length} other ${options.length === 1 ? "way" : "ways"} found` : "No other ways found in these classes",
+        used === null ? null : `used ${used} live ${used === 1 ? "check" : "checks"}`,
+        typeof data.lookups_used === "number" ? `${data.lookups_used} routes read` : null,
+      ].filter(Boolean);
+      const summary = $("other-summary");
+      summary.replaceChildren(document.createTextNode(parts.join(" · ") + "."));
+      if (via.length)
+        summary.append(el("br"), document.createTextNode(`Changes checked at: ${via.map((c) => knownStationName(c) || c).join(", ")}.`));
+      for (const n of problems) summary.append(el("br"), document.createTextNode(n));
+      summary.hidden = false;
+      renderOtherCost();
+    }
+    renderSummary();
   } catch (e) {
     if (e && e.name === "AbortError") return;
     if (mine !== other.seq) return;
@@ -1145,7 +1188,35 @@ async function findOtherWays() {
   }
 }
 
+const HUBS_CHECKED = 5;
+const OVERNIGHT_MAX_WAIT = 900;
+
+/** Estimated live checks for one press: the direct route (often cached), each selected nearby destination, two per change station. */
+function renderOtherCost() {
+  const r = results.route;
+  if (!r) return;
+  const alts = nearbyFor(r.to).filter((s) => s.on).length;
+  const estimate = 1 + alts + HUBS_CHECKED * 2;
+  const left = liveUsed !== null && liveLimit !== null ? liveLimit - liveUsed : null;
+  $("other-cost").textContent =
+    `Uses up to about ${estimate} live checks` +
+    (left === null ? "." : left < estimate ? ` — only ${left} left today, so some routes may not be checked.` : ` (${left} left today).`);
+}
+
+function setOvernight(on) {
+  save(KEYS.overnight, on);
+  $("wait-normal").setAttribute("aria-pressed", String(!on));
+  $("wait-overnight").setAttribute("aria-pressed", String(on));
+}
+
 function initOther() {
+  setOvernight(load(KEYS.overnight, false) === true);
+  $("wait-normal").addEventListener("click", () => setOvernight(false));
+  $("wait-overnight").addEventListener("click", () => setOvernight(true));
+  $("no-seats-btn").addEventListener("click", () => {
+    $("other-ways").scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!$("other-btn").disabled) findOtherWays();
+  });
   nearbyField = stationField($("nearby-input"), $("nearby-suggestions"), () => {
     const s = nearbyField && nearbyField.get();
     if (!s) return;
