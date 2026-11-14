@@ -1,7 +1,18 @@
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { request as httpRequest, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ALLOWED_TOOLS, DailyReadCap, SECURITY_HEADERS, createLocalApp, httpStatusFor, type LocalAppOptions } from "../src/app.js";
+import {
+  ALLOWED_TOOLS,
+  DailyReadCap,
+  FileCapStore,
+  SECURITY_HEADERS,
+  createLocalApp,
+  httpStatusFor,
+  type LocalAppOptions,
+} from "../src/app.js";
 import { buildContext, loadConfig } from "../src/config.js";
 import { RailError } from "../src/core/errors.js";
 import { addDays, todayInIndia } from "../src/core/time.js";
@@ -378,5 +389,82 @@ describe("daily live-check cap", () => {
     // over the cap: the hook throws and Firecrawl is not called
     await expect(p.routeAvailability({ from: "AAA", to: "EEE", date: D })).rejects.toMatchObject({ code: "RATE_LIMITED" });
     expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("daily count survives restarts", () => {
+  const dirs: string[] = [];
+  const stateFile = () => {
+    const dir = mkdtempSync(join(tmpdir(), "rsf-cap-"));
+    dirs.push(dir);
+    return join(dir, "state", "live-checks.json");
+  };
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  const at = (iso: string) => () => new Date(iso);
+  const evening = at("2026-11-20T17:30:00Z"); // 23:00 IST
+
+  it("a new app process continues today's count from the file and keeps the cap", () => {
+    const file = stateFile();
+    const first = new DailyReadCap(3, evening, new FileCapStore(file));
+    first.beforeRead();
+    first.beforeRead();
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ day: "2026-11-20", count: 2 });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+
+    const restarted = new DailyReadCap(3, evening, new FileCapStore(file));
+    expect(restarted.used()).toBe(2);
+    restarted.beforeRead();
+    expect(() => restarted.beforeRead()).toThrow(RailError);
+    expect(new DailyReadCap(3, evening, new FileCapStore(file)).remaining()).toBe(0);
+  });
+
+  it("a count saved on an earlier IST day does not carry over", () => {
+    const file = stateFile();
+    const yesterday = new DailyReadCap(3, evening, new FileCapStore(file));
+    for (let i = 0; i < 3; i++) yesterday.beforeRead();
+    const nextDay = new DailyReadCap(3, at("2026-11-20T18:31:00Z"), new FileCapStore(file)); // 00:01 IST on the 21st
+    expect(nextDay.used()).toBe(0);
+    nextDay.beforeRead();
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ day: "2026-11-21", count: 1 });
+  });
+
+  it("two app instances sharing the file don't undercount", () => {
+    const file = stateFile();
+    const a = new DailyReadCap(10, evening, new FileCapStore(file));
+    const b = new DailyReadCap(10, evening, new FileCapStore(file));
+    a.beforeRead();
+    a.beforeRead();
+    b.beforeRead(); // sees a's 2 first
+    expect(a.used()).toBe(3);
+    expect(b.used()).toBe(3);
+  });
+
+  it("a malformed file is reported once, counted from 0, and then rewritten", () => {
+    const file = stateFile();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    new FileCapStore(file).save({ day: "2026-11-20", count: 1 });
+    for (const bad of ["{not json", JSON.stringify({ day: "2026-11-20", count: -4 }), JSON.stringify({ day: "yesterday", count: 2 })]) {
+      writeFileSync(file, bad);
+      const cap = new DailyReadCap(3, evening, new FileCapStore(file));
+      expect(cap.used()).toBe(0);
+      cap.beforeRead();
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ day: "2026-11-20", count: 1 });
+    }
+    expect(warn).toHaveBeenCalledTimes(3); // once per store, not once per read
+  });
+
+  it("the API reports the restored count", async () => {
+    const file = stateFile();
+    new FileCapStore(file).save({ day: todayInIndia(), count: 7 });
+    const cap = new DailyReadCap(150, undefined, new FileCapStore(file));
+    const ctx = buildContext(loadConfig({ GEOCODER: "off" }), { timetables: [sampleProvider()] });
+    const server = createLocalApp(ctx, { cap }).listen(0, "127.0.0.1");
+    servers.push(server);
+    await new Promise((r) => server.once("listening", r));
+    const port = (server.address() as AddressInfo).port;
+    expect((await call(port, "GET", "/api/status")).json.live_checks).toEqual({ used: 7, limit: 150 });
   });
 });

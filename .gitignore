@@ -2,6 +2,7 @@ node_modules
 dist
 data/raw
 .env
+.app-state/
 __pycache__/
 *.pyc
 .playwright-mcp/

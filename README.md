@@ -124,10 +124,11 @@ npm run app
 |---|---|
 | `APP_PORT` | Port on 127.0.0.1 (default `4321`) |
 | `APP_DAILY_PAGE_READS` | Daily cap on live page reads (default `150`, resets at midnight IST). Only real Firecrawl reads count, not cache hits |
+| `APP_STATE_FILE` | Where today's live-check count is kept so it survives restarts (default `.app-state/live-checks.json`, git-ignored, readable only by you) |
 
 ### Cost
 
-Each live check is one Firecrawl page read on your key. Opening a results page is one check (repeats within 90 seconds come from the cache). "Other ways to go" reads every route it considers, typically around 10 checks per press. The header shows today's count, and the app refuses further live checks once the daily cap is reached.
+Each live check is one Firecrawl page read on your key. Opening a results page is one check (repeats within 90 seconds come from the cache). "Other ways to go" reads every route it considers, typically around 10 checks per press. The header shows today's count, and the app refuses further live checks once the daily cap is reached. The count is saved to `.app-state/live-checks.json`, so restarting the app does not reset it.
 
 ### Safety
 

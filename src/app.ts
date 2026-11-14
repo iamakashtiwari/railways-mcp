@@ -10,8 +10,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
+import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { type AppContext, buildContext, loadConfig } from "./config.js";
 import { RailError } from "./core/errors.js";
@@ -70,10 +71,74 @@ export function httpStatusFor(code: string): number {
   return STATUS[code as ApiErrorCode] ?? 502;
 }
 
+/** The day (YYYY-MM-DD, IST) and how many live reads were made on it. */
+export interface CapState {
+  day: string;
+  count: number;
+}
+
+/** Where the daily count is kept between restarts. */
+export interface CapStore {
+  load(): CapState | null;
+  save(state: CapState): void;
+}
+
+/**
+ * Keeps the daily count in a small JSON file readable only by you (mode 600, in a mode 700 folder).
+ * Writes go to a temporary file that is renamed into place, so a crash never leaves half a file.
+ * An unreadable or malformed file is reported and treated as "no reads yet today".
+ */
+export class FileCapStore implements CapStore {
+  private warned = false;
+
+  constructor(readonly path: string) {}
+
+  load(): CapState | null {
+    let text: string;
+    try {
+      text = readFileSync(this.path, "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+      this.warn(`could not read ${this.path}: ${(e as Error).message}`);
+      return null;
+    }
+    try {
+      const v = JSON.parse(text) as Partial<CapState>;
+      if (typeof v.day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v.day) && Number.isInteger(v.count) && (v.count as number) >= 0) {
+        return { day: v.day, count: v.count as number };
+      }
+    } catch {
+      /* reported below */
+    }
+    this.warn(`${this.path} is not a valid live-check count; starting from 0 for today`);
+    return null;
+  }
+
+  save(state: CapState): void {
+    try {
+      mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+      const tmp = `${this.path}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(state) + "\n", { mode: 0o600 });
+      renameSync(tmp, this.path);
+    } catch (e) {
+      this.warn(`could not save the live-check count to ${this.path}: ${(e as Error).message}`);
+    }
+  }
+
+  private warn(message: string): void {
+    if (this.warned) return;
+    this.warned = true;
+    console.warn(`Warning: ${message}`);
+  }
+}
+
 /**
  * Daily budget of real live page reads, resetting at midnight IST.
  * `beforeRead` is the railyatri provider hook: it runs only when a page is
  * actually fetched (never on a cache hit) and throws once the budget is used.
+ * With a store, the count survives restarts: it is re-read before each check
+ * (the higher of the stored and in-memory counts for today wins) and saved
+ * after each read.
  */
 export class DailyReadCap {
   private day = "";
@@ -82,18 +147,21 @@ export class DailyReadCap {
   constructor(
     readonly limit: number,
     private readonly now: () => Date = () => new Date(),
+    private readonly store?: CapStore,
   ) {}
 
-  private roll(): void {
+  private sync(): void {
     const today = todayInIndia(this.now());
     if (today !== this.day) {
       this.day = today;
       this.count = 0;
     }
+    const stored = this.store?.load();
+    if (stored && stored.day === today && stored.count > this.count) this.count = stored.count;
   }
 
   used(): number {
-    this.roll();
+    this.sync();
     return this.count;
   }
 
@@ -102,11 +170,12 @@ export class DailyReadCap {
   }
 
   readonly beforeRead = (): void => {
-    this.roll();
+    this.sync();
     if (this.count >= this.limit) {
       throw new RailError("RATE_LIMITED", `The daily limit of ${this.limit} live checks is used up; it resets at midnight IST.`, "app");
     }
     this.count++;
+    this.store?.save({ day: this.day, count: this.count });
   };
 }
 
@@ -140,6 +209,15 @@ export interface LocalAppOptions {
   secrets?: Array<string | undefined>;
   /** Clock for the per-minute limit; tests pin it. */
   nowMs?: () => number;
+}
+
+/** Default file for the daily live-check count: .app-state/live-checks.json in the repository. */
+export function defaultStateFile(): string {
+  for (const rel of ["../", "../../"]) {
+    const root = fileURLToPath(new URL(rel, import.meta.url));
+    if (existsSync(`${root}package.json`)) return `${root}.app-state/live-checks.json`;
+  }
+  return fileURLToPath(new URL("../.app-state/live-checks.json", import.meta.url));
 }
 
 function defaultWebDir(): string {
@@ -332,14 +410,15 @@ async function main(): Promise<void> {
   const port = intSetting("APP_PORT", process.env.APP_PORT, DEFAULT_PORT, 1, 65_535);
   const limit = intSetting("APP_DAILY_PAGE_READS", process.env.APP_DAILY_PAGE_READS, DEFAULT_DAILY_PAGE_READS, 0, 100_000);
   const cfg = loadConfig();
-  const cap = new DailyReadCap(limit);
+  const store = new FileCapStore(process.env.APP_STATE_FILE?.trim() || defaultStateFile());
+  const cap = new DailyReadCap(limit, undefined, store);
   const ctx = buildContext(cfg, { railyatriBeforeRead: cap.beforeRead });
   if (!cfg.unofficial.has("railyatri")) {
     console.warn("railyatri is not enabled (ENABLE_UNOFFICIAL_SOURCES), so live seat checks will be unavailable.");
   }
   const app = createLocalApp(ctx, { cap, secrets: [cfg.firecrawl.apiKey] });
   const server: Server = app.listen(port, LISTEN_HOST);
-  server.on("listening", () => console.log(`Rail Seat Finder: http://${LISTEN_HOST}:${port}/ (live checks today: 0/${limit})`));
+  server.on("listening", () => console.log(`Rail Seat Finder: http://${LISTEN_HOST}:${port}/ (live checks today: ${cap.used()}/${limit})`));
   server.on("error", (e) => {
     console.error(`Could not listen on ${LISTEN_HOST}:${port}: ${e.message}`);
     process.exit(1);
