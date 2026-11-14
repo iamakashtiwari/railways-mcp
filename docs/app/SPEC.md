@@ -143,6 +143,18 @@ Each option shows:
 
 - Before every commit: `npm run typecheck && npm test && npm run format:check`.
 
+## Known pitfalls
+
+1. **`.env` is not loaded automatically.** This repository does not read `.env` on its own. Every command that needs the key must run with `tsx --env-file=.env` (the `app` script and the smoke test).
+2. **The RailYatri page can show the wrong day.** It converts the date with the browser's time zone, so outside India it silently shows the previous day. The `railyatri` provider already asks Firecrawl for an Indian location and rejects a page whose shown date differs. Never remove or bypass that check.
+3. **Live checks are slow and cost money.** A fresh live check takes 15 to 25 seconds (Firecrawl waits about 10 s for seats to render). Do not add automatic retries that double the cost; the provider caches each route and date for 90 seconds.
+4. **Some cells don't load.** On busy routes some class cells show "Tap to refresh" (category `unknown`). Show them as grey "not loaded" and count them; never guess a status.
+5. **Trains from nearby terminals are included.** Searches from NDLS also list trains from nearby terminals (ANVT, DLI). Show the real boarding and arrival station on each card.
+6. **Don't pick nearby stations automatically.** The timetable's `trains_halting` counts trains that pass small halts too (Kulharia shows 139, more than Siwan's 62), so picking by distance or train count chooses tiny halts. I pick them myself.
+7. **`fetch()` can't set the Host header in tests.** Use `node:http` `request()` for the DNS-rebinding test. The Host check needs the real port, so bind first, read the port, then build the app for it.
+8. **Synthetic test data only.** Fixtures and test data must be synthetic. Never commit a real scraped page.
+9. **No booking code, ever.** Never add booking, IRCTC login, CAPTCHA, OTP or payment code. Automated ticket booking can be an offence under Section 143 of the Railways Act.
+
 ## Scope
 
 - **Out of scope for now:** PNR tracker, alerts, Tatkal page.
