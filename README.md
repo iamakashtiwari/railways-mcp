@@ -98,6 +98,47 @@ How it works and what it guards against:
 - `plan_journey` connections come from the official timetable (one change, layover 2–10 h by default) and each leg is checked live on the date you'd actually board it. Each leg is a separate ticket: a late first train does not protect the second.
 - `npm run smoke -- railyatri` checks the live page layout end to end.
 
+## Private web app (Rail Seat Finder)
+
+A small search page for live seat availability that runs only on your own computer, built on this server's tools (spec: [docs/app/SPEC.md](docs/app/SPEC.md)). It is for one person on one machine, never for hosting.
+
+- **Search:** From and To with station autocomplete, a swap button, date chips (today and the next 5 days) plus a date picker, class chips (remembered), and your last 6 searches.
+- **Results:** every train on the route for the date, with one box per class: green available, amber RAC, red waitlist, grey regret or not loaded, with fare and confirmation chance. Confirmed seats sort first, then the smallest RAC or waitlist number, then departure time. A 7-day row moves between dates and shows "N open" under dates you've already checked that had confirmed seats. "Seats only" and "All classes" filter the list; links go to IRCTC and the RailYatri page.
+- **Other ways to go** (only when you press the button): `plan_journey` with one-change journeys through up to 3 change stations, plus up to 3 nearby destination stations that **you** add (they are never picked automatically). Each option shows its legs, total fare and, for connections, that they are two separate tickets.
+
+### Set up and run
+
+```bash
+scripts/setup-local.sh
+```
+
+The script checks Node.js 22+, runs `npm install`, creates `.env` from `.env.example` if it's missing (readable only by you), asks for your Firecrawl API key with hidden input if `FIRECRAWL_API_KEY` is empty, enables `railyatri` in `ENABLE_UNOFFICIAL_SOURCES`, and starts the app at <http://127.0.0.1:4321/>. Afterwards, start it with:
+
+```bash
+npm run app
+```
+
+`npm run app` runs `tsx --env-file=.env src/app.ts`; the server itself does not read `.env`.
+
+| Variable | Purpose |
+|---|---|
+| `APP_PORT` | Port on 127.0.0.1 (default `4321`) |
+| `APP_DAILY_PAGE_READS` | Daily cap on live page reads (default `150`, resets at midnight IST). Only real Firecrawl reads count, not cache hits |
+
+### Cost
+
+Each live check is one Firecrawl page read on your key. Opening a results page is one check (repeats within 90 seconds come from the cache). "Other ways to go" reads every route it considers, typically around 10 checks per press. The header shows today's count, and the app refuses further live checks once the daily cap is reached.
+
+### Safety
+
+- Listens on `127.0.0.1` only, and rejects requests whose `Host` header isn't `127.0.0.1:PORT` or `localhost:PORT` (DNS rebinding).
+- The API answers only same-origin requests carrying `x-app: railways` (checked together with `Origin` and `Sec-Fetch-Site`) and sends no CORS headers.
+- Strict Content Security Policy, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`; no third-party scripts, fonts, CDNs or analytics. All text from the server is inserted with `textContent`.
+- The API can call only `search_stations`, `find_nearby_stations`, `get_route_availability`, `plan_journey` and `get_data_sources`, at most 120 times a minute.
+- The Firecrawl key stays in `.env`: it is never logged or sent to the browser.
+
+The app never books, logs in to IRCTC, or handles CAPTCHA, OTP or payment. Live seats come from an unofficial source (see [DISCLAIMER.md](DISCLAIMER.md)): always confirm on IRCTC before booking.
+
 ## Run locally with Docker (recommended)
 
 ```bash
