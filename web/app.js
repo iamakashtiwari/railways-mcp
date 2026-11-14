@@ -118,7 +118,10 @@ function showLiveChecks(lc) {
   if (!Number.isFinite(used) || !Number.isFinite(limit)) return;
   const node = $("live-count");
   node.textContent = `${used}/${limit} live checks today`;
-  node.classList.toggle("is-low", limit > 0 && limit - used <= Math.max(5, Math.round(limit * 0.1)));
+  const meter = $("live-meter");
+  meter.max = Math.max(1, limit);
+  meter.value = Math.min(used, limit);
+  node.parentElement.classList.toggle("is-low", limit > 0 && limit - used <= Math.max(5, Math.round(limit * 0.1)));
 }
 
 async function refreshLiveChecks() {
@@ -356,8 +359,12 @@ function renderDateChips() {
     chip.type = "button";
     chip.dataset.date = iso;
     chip.setAttribute("aria-pressed", String(iso === state.date));
-    chip.append(el("span", null, i === 0 ? "Today" : i === 1 ? "Tomorrow" : `${p.weekday} ${p.day}`));
-    if (i < 2) chip.append(el("span", "chip-sub", `${p.day} ${p.month}`));
+    chip.append(
+      el("span", "chip-day", i === 0 ? "Today" : i === 1 ? "Tmrw" : p.weekday),
+      el("span", "chip-num", p.day),
+      el("span", "chip-month", p.month),
+    );
+    chip.setAttribute("aria-label", i === 0 ? `Today, ${shortDate(iso)}` : i === 1 ? `Tomorrow, ${shortDate(iso)}` : shortDate(iso));
     chip.addEventListener("click", () => setDate(iso));
     box.append(chip);
   }
@@ -439,7 +446,9 @@ function renderRecent() {
     const li = el("li");
     const btn = el("button", "recent-item");
     btn.type = "button";
-    btn.append(el("span", "recent-route", `${r.from.name} → ${r.to.name}`));
+    const codes = el("span", "recent-codes");
+    codes.append(el("span", null, r.from.code), el("span", "arrow", "→"), el("span", null, r.to.code));
+    btn.append(codes, el("span", "recent-names", `${r.from.name} → ${r.to.name}`));
     const past = r.date < today;
     btn.append(el("span", "recent-meta", `${past ? "Past date" : shortDate(r.date)} · ${r.classes.join(" ")}`));
     btn.addEventListener("click", () => {
@@ -511,6 +520,7 @@ function railYatriUrl(from, to, iso) {
 
 const ERROR_TEXT = {
   DAILY_LIMIT: ["Today's live checks are used up", "The daily limit protects your Firecrawl credits. It resets at midnight IST."],
+  BUSY: ["Another live check is still running", "To protect your live checks, only two run at once. Wait a few seconds, then try again."],
   TOO_MANY_REQUESTS: ["Too many requests", "The app allows 120 requests a minute. Wait a moment, then try again."],
   RATE_LIMITED: ["The seat source is busy", "RailYatri or Firecrawl is limiting requests right now, or the Firecrawl credits are used up."],
   UPSTREAM_UNAVAILABLE: [
@@ -631,7 +641,11 @@ function openCount(from, to, date, classes) {
 
 function renderTitle(r) {
   const name = (code) => knownStationName(code) || code;
-  $("results-title").textContent = `${name(r.from)} → ${name(r.to)}`;
+  $("results-title").textContent = `${name(r.from)} to ${name(r.to)}`;
+  $("route-from-code").textContent = r.from;
+  $("route-to-code").textContent = r.to;
+  $("route-from-name").textContent = knownStationName(r.from) || "";
+  $("route-to-name").textContent = knownStationName(r.to) || "";
   $("results-sub").textContent = `${shortDate(r.date)} · ${r.classes.join(" ")}`;
   document.title = `${r.from} → ${r.to} · Rail Seat Finder`;
 }
@@ -747,10 +761,22 @@ function timeBlock(time, code, plusDays, end) {
   return box;
 }
 
+/** The best status among the shown classes, for the card's summary pill. */
+function bestFlag(cells) {
+  if (cells.some((c) => c.category === "available")) return ["is-available", "Seats available"];
+  const rac = cells.filter((c) => c.category === "rac");
+  if (rac.length) return ["is-rac", "RAC"];
+  if (cells.some((c) => c.category === "waitlist")) return ["is-waitlist", "Waitlist"];
+  return null;
+}
+
 function trainCard(t, searched) {
-  const li = el("li", "train");
+  const cells = shownClasses(t);
+  const li = el("li", hasSeats(cells) ? "train has-seats" : "train");
   const head = el("div", "train-head");
   head.append(el("span", "train-no", t.train_number), el("span", "train-name", t.train_name));
+  const flag = bestFlag(cells);
+  if (flag) head.append(el("span", `seat-flag ${flag[0]}`, flag[1]));
   li.append(head);
 
   const times = el("div", "train-times");
@@ -764,7 +790,6 @@ function trainCard(t, searched) {
   if (t.to_code && t.to_code !== searched.to) notes.push(`Arrives at ${t.to_code}, not ${searched.to}.`);
   if (notes.length) li.append(el("p", "station-note", notes.join(" ")));
 
-  const cells = shownClasses(t);
   if (cells.length) {
     const boxes = el("ul", "class-boxes");
     for (const c of cells) boxes.append(classBox(c));
@@ -774,9 +799,9 @@ function trainCard(t, searched) {
   }
 
   const links = el("div", "train-links");
-  const irctc = el("a", "link", "Book on IRCTC");
+  const irctc = el("a", "link-primary", "Book on IRCTC");
   irctc.href = IRCTC_URL;
-  const ry = el("a", "link", "RailYatri");
+  const ry = el("a", "link-ghost", "RailYatri");
   ry.href = railYatriUrl(searched.from, searched.to, searched.date);
   for (const a of [irctc, ry]) {
     a.target = "_blank";
@@ -1009,7 +1034,7 @@ function optionCard(o, dest) {
     const row = el("li", "leg");
     const info = el("div");
     const train = el("div", "leg-train");
-    train.append(el("span", "train-no", l.train_number), document.createTextNode(l.train_name || ""));
+    train.append(el("span", "train-no", l.train_number), el("span", "leg-name", l.train_name || ""));
     const when = `${shortDate(l.date)} · ${l.from_code} ${l.departure_time || "--:--"} → ${l.to_code} ${l.arrival_time || "--:--"}`;
     info.append(train, el("div", "leg-route", when));
     row.append(info, classBox(l));
