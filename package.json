@@ -29,6 +29,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/src/server.js",
+    "app": "tsx --env-file=.env src/app.ts",
     "dev": "tsx watch src/server.ts",
     "build:data": "tsx scripts/build-snapshot.ts",
     "test": "vitest run",

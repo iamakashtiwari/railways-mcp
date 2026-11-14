@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#064e3b" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Rail Seat Finder</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <div class="backdrop" aria-hidden="true"></div>
+
+    <header class="appbar">
+      <div class="appbar-inner">
+        <a class="brand" href="#/">
+          <span class="brand-mark" aria-hidden="true"><span></span></span>
+          <span class="brand-name">Rail Seat Finder</span>
+        </a>
+        <div class="meter" title="Live checks used today">
+          <span class="meter-text" id="live-count" aria-live="polite">… live checks</span>
+          <progress class="meter-bar" id="live-meter" max="150" value="0" aria-hidden="true"></progress>
+        </div>
+      </div>
+    </header>
+
+    <main class="page">
+      <!-- Page 1: Search -->
+      <section id="view-search" aria-labelledby="search-title">
+        <div class="hero">
+          <p class="eyebrow">Live seats · every train · one search</p>
+          <h1 class="hero-title" id="search-title">Where are you headed?</h1>
+          <p class="hero-sub">Check confirmed, RAC and waitlist status for every train on your route.</p>
+        </div>
+
+        <form class="card search-card" id="search-form" autocomplete="off" novalidate>
+          <div class="journey">
+            <div class="journey-field">
+              <label class="journey-label" for="from-input">From</label>
+              <div class="combo">
+                <input
+                  class="journey-input"
+                  id="from-input"
+                  type="text"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-expanded="false"
+                  aria-controls="from-list"
+                  placeholder="Station or code"
+                  spellcheck="false"
+                  autocapitalize="off"
+                />
+                <ul class="suggestions" id="from-list" role="listbox" aria-label="From stations" hidden></ul>
+              </div>
+            </div>
+            <div class="journey-divider" aria-hidden="true"></div>
+            <div class="journey-field is-to">
+              <label class="journey-label" for="to-input">To</label>
+              <div class="combo">
+                <input
+                  class="journey-input"
+                  id="to-input"
+                  type="text"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-expanded="false"
+                  aria-controls="to-list"
+                  placeholder="Station or code"
+                  spellcheck="false"
+                  autocapitalize="off"
+                />
+                <ul class="suggestions" id="to-list" role="listbox" aria-label="To stations" hidden></ul>
+              </div>
+            </div>
+            <button class="swap" id="swap" type="button" aria-label="Swap From and To" title="Swap From and To">
+              <span aria-hidden="true">⇅</span>
+            </button>
+          </div>
+
+          <fieldset class="group">
+            <legend class="group-label">When</legend>
+            <div class="date-row">
+              <div class="chips date-chips" id="date-chips"></div>
+              <label class="date-picker" title="Pick another date">
+                <span class="visually-hidden">Pick another date</span>
+                <input class="date-input" id="date-input" type="date" />
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset class="group">
+            <legend class="group-label">Classes</legend>
+            <div class="chips class-chips" id="class-chips"></div>
+          </fieldset>
+
+          <button class="cta" id="check-btn" type="submit" disabled>
+            <span>Check live seats</span>
+            <span class="cta-arrow" aria-hidden="true">→</span>
+          </button>
+          <p class="hint" id="check-hint">Pick both stations to check seats.</p>
+        </form>
+
+        <section class="recent" id="recent" aria-labelledby="recent-title" hidden>
+          <h2 class="section-title" id="recent-title">Recent searches</h2>
+          <ul class="recent-list" id="recent-list"></ul>
+        </section>
+      </section>
+
+      <!-- Page 2: Results -->
+      <section id="view-results" aria-labelledby="results-title" hidden>
+        <div class="card results-head">
+          <div class="results-top">
+            <a class="back-link" href="#/"><span aria-hidden="true">←</span> New search</a>
+            <button class="icon-btn" id="refresh-btn" type="button" title="Check again"><span aria-hidden="true">↻</span> Refresh</button>
+          </div>
+
+          <h1 class="visually-hidden" id="results-title">Results</h1>
+          <div class="route" aria-hidden="true">
+            <div class="route-end">
+              <span class="route-code" id="route-from-code"></span>
+              <span class="route-name" id="route-from-name"></span>
+            </div>
+            <div class="route-line"><span></span></div>
+            <div class="route-end is-end">
+              <span class="route-code" id="route-to-code"></span>
+              <span class="route-name" id="route-to-name"></span>
+            </div>
+          </div>
+          <p class="results-sub" id="results-sub"></p>
+
+          <nav class="day-row" id="day-row" aria-label="Other dates"></nav>
+
+          <div class="results-bar">
+            <p class="status-line" id="status-line" aria-live="polite"></p>
+            <div class="toggles">
+              <button class="toggle" id="toggle-seats" type="button" aria-pressed="false">Seats only</button>
+              <button class="toggle" id="toggle-all" type="button" aria-pressed="false">All classes</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="loading" id="loading" hidden>
+          <p class="loading-text" aria-live="polite">
+            <span class="pulse" aria-hidden="true"></span>
+            <span id="loading-counter">Checking live seats… 0 s</span>
+          </p>
+          <p class="loading-note">A fresh live check takes 15 to 25 seconds.</p>
+          <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+        </div>
+
+        <div id="results-error" hidden></div>
+        <p class="empty" id="results-empty" hidden></p>
+        <ol class="train-list" id="train-list" aria-label="Trains"></ol>
+
+        <section class="card other-ways" id="other-ways" aria-labelledby="other-title">
+          <div class="other-head">
+            <h2 class="other-title" id="other-title">Other ways to go</h2>
+            <p class="other-sub">
+              One change of train through up to 3 stations, plus any nearby destinations you add. Each route it reads uses one live check.
+            </p>
+          </div>
+
+          <div class="group">
+            <span class="group-label" id="nearby-label">Nearby destinations</span>
+            <ul class="nearby-list" id="nearby-list" aria-labelledby="nearby-label"></ul>
+            <div class="combo">
+              <label class="visually-hidden" for="nearby-input">Add a nearby destination station</label>
+              <input
+                class="field-input"
+                id="nearby-input"
+                type="text"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded="false"
+                aria-controls="nearby-suggestions"
+                placeholder="+ Add a nearby station"
+                spellcheck="false"
+                autocapitalize="off"
+              />
+              <ul class="suggestions" id="nearby-suggestions" role="listbox" aria-label="Nearby stations" hidden></ul>
+            </div>
+            <p class="hint-left" id="nearby-help"></p>
+          </div>
+
+          <button class="cta is-secondary" id="other-btn" type="button">
+            <span>Find other ways to go</span>
+            <span class="cta-arrow" aria-hidden="true">→</span>
+          </button>
+
+          <div class="loading" id="other-loading" hidden>
+            <p class="loading-text" aria-live="polite">
+              <span class="pulse" aria-hidden="true"></span>
+              <span id="other-counter">Checking other ways… 0 s</span>
+            </p>
+            <p class="loading-note">This reads several routes live, so it can take a minute.</p>
+            <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+            <div class="skeleton" aria-hidden="true"><span></span><span></span><span></span></div>
+          </div>
+          <div id="other-error" hidden></div>
+          <p class="other-summary" id="other-summary" aria-live="polite" hidden></p>
+          <ol class="option-list" id="option-list" aria-label="Other ways to go"></ol>
+        </section>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>
+        Private app on this Mac. Seats come from RailYatri's public page (unofficial, general quota) and can be wrong or out of date. Always
+        confirm on IRCTC before booking.
+      </p>
+    </footer>
+  </body>
+</html>

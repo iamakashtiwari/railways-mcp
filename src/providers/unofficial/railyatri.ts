@@ -57,6 +57,11 @@ export interface RailYatriOptions {
   cache?: TtlCache<RouteAvailability>;
   /** Clock for observed_at; tests pin it. */
   now?: () => Date;
+  /**
+   * Called just before each real Firecrawl page read (never on a cache hit). Throwing a RailError
+   * cancels the read and fails the call with that error, e.g. when a daily read budget is used up.
+   */
+  beforeRead?: () => void;
 }
 
 /** DD-MM-YYYY, the page's journey_date format. */
@@ -294,6 +299,7 @@ export class RailYatriProvider implements RouteAvailabilitySource, AvailabilityS
   }
 
   private async fetchRoute(from: string, to: string, date: string): Promise<RouteAvailability> {
+    this.opts.beforeRead?.();
     const body = JSON.stringify({
       url: pageUrl(from, to, date),
       formats: ["markdown"],

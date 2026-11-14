@@ -1,0 +1,553 @@
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { request as httpRequest, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  ALLOWED_TOOLS,
+  DailyReadCap,
+  FileCapStore,
+  MAX_CONCURRENT_LIVE_CALLS,
+  SECURITY_HEADERS,
+  createLocalApp,
+  httpStatusFor,
+  type LocalAppOptions,
+} from "../src/app.js";
+import { buildContext, loadConfig } from "../src/config.js";
+import { RailError } from "../src/core/errors.js";
+import { addDays, todayInIndia } from "../src/core/time.js";
+import type { RouteAvailability, RouteTrainAvailability } from "../src/core/types.js";
+import { TtlCache } from "../src/lib/cache.js";
+import type { RouteAvailabilityQuery, RouteAvailabilitySource } from "../src/providers/types.js";
+import { RailYatriProvider } from "../src/providers/unofficial/railyatri.js";
+import { sampleProvider } from "./helpers.js";
+
+const D = addDays(todayInIndia(), 7);
+
+/** Synthetic live listing (no real train data). */
+const TRAIN: RouteTrainAvailability = {
+  train_number: "55555",
+  train_name: "Train 55555",
+  from_code: "AAA",
+  to_code: "DDD",
+  departure_time: "10:00",
+  arrival_time: "20:00",
+  duration_minutes: 600,
+  runs_on_date: true,
+  next_run: null,
+  classes: [{ class_code: "3A", status: "12 Available", category: "available", count: 12, fare_inr: 1000, confirm_chance: null }],
+};
+
+/**
+ * Fake route_availability provider. Like railyatri, it calls the beforeRead hook only on a
+ * real "page read" and serves repeats from its own cache. Behaviour per route via `errors`.
+ */
+class FakeRoute implements RouteAvailabilitySource {
+  readonly info = {
+    id: "fake-live",
+    name: "Fake live",
+    kind: "unofficial_api" as const,
+    capabilities: [],
+    dataAsOf: null,
+    possiblyOutdated: false,
+  };
+  readonly reads: string[] = [];
+  errors: Record<string, RailError> = {};
+  /** When set, reads wait for it (to hold calls in flight). */
+  gate: Promise<void> | null = null;
+  waiting = 0;
+  private readonly cache = new Map<string, RouteAvailability>();
+
+  constructor(private readonly beforeRead?: () => void) {}
+
+  async routeAvailability(q: RouteAvailabilityQuery): Promise<RouteAvailability> {
+    const key = `${q.from}|${q.to}|${q.date}`;
+    if (this.gate) {
+      this.waiting++;
+      await this.gate;
+      this.waiting--;
+    }
+    const err = this.errors[`${q.from}|${q.to}`];
+    if (err) throw err;
+    const hit = this.cache.get(key);
+    if (hit) return hit;
+    this.beforeRead?.();
+    this.reads.push(key);
+    const value: RouteAvailability = {
+      from_code: q.from,
+      to_code: q.to,
+      date: q.date,
+      quota: "GN",
+      trains: [{ ...TRAIN, from_code: q.from, to_code: q.to }],
+      observed_at: "2026-01-01T00:00:00.000Z",
+    };
+    this.cache.set(key, value);
+    return value;
+  }
+}
+
+interface Started {
+  port: number;
+  fake: FakeRoute;
+  cap: DailyReadCap;
+}
+
+const servers: Server[] = [];
+afterEach(async () => {
+  vi.unstubAllGlobals();
+  await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))));
+});
+
+async function start(opts: { limit?: number; capNow?: () => Date } & Partial<Omit<LocalAppOptions, "cap">> = {}): Promise<Started> {
+  const cap = new DailyReadCap(opts.limit ?? 150, opts.capNow);
+  const ctx = buildContext(loadConfig({ GEOCODER: "off" }), { timetables: [sampleProvider()] });
+  const fake = new FakeRoute(cap.beforeRead);
+  ctx.registry.register("route_availability", fake);
+  const app = createLocalApp(ctx, { ...opts, cap });
+  const server = app.listen(0, "127.0.0.1");
+  servers.push(server);
+  await new Promise((r) => server.once("listening", r));
+  return { port: (server.address() as AddressInfo).port, fake, cap };
+}
+
+interface Reply {
+  status: number;
+  headers: Record<string, string | string[] | undefined>;
+  text: string;
+  json: any;
+}
+
+/** Raw HTTP request (node:http lets tests set any Host header). Same-origin page headers by default. */
+function call(
+  port: number,
+  method: string,
+  path: string,
+  opts: { headers?: Record<string, string | undefined>; body?: unknown } = {},
+): Promise<Reply> {
+  const base: Record<string, string | undefined> = {
+    host: `127.0.0.1:${port}`,
+    "x-app": "railways",
+    origin: `http://127.0.0.1:${port}`,
+    "sec-fetch-site": "same-origin",
+  };
+  const headers = Object.fromEntries(Object.entries({ ...base, ...opts.headers }).filter(([, v]) => v !== undefined)) as Record<
+    string,
+    string
+  >;
+  const body = opts.body === undefined ? undefined : typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
+  if (body !== undefined) headers["content-type"] = "application/json";
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, method, path, headers }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => (text += c));
+      res.on("end", () => {
+        let json: unknown;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          json = undefined;
+        }
+        resolve({ status: res.statusCode ?? 0, headers: res.headers, text, json });
+      });
+    });
+    req.on("error", reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
+const tool = (port: number, name: string, args: unknown, headers?: Record<string, string | undefined>) =>
+  call(port, "POST", `/api/tools/${name}`, { body: args, headers });
+
+function expectSecurityHeaders(r: Reply): void {
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) expect(r.headers[k.toLowerCase()]).toBe(v);
+  expect(r.headers["x-powered-by"]).toBeUndefined();
+  expect(Object.keys(r.headers).filter((h) => h.startsWith("access-control-"))).toEqual([]);
+}
+
+describe("security headers", () => {
+  it("are set on the page, API answers, errors and unknown paths, with no X-Powered-By or CORS headers", async () => {
+    const { port } = await start();
+    const page = await call(port, "GET", "/");
+    expect(page.status).toBe(200);
+    expect(page.text).toContain("Rail Seat Finder");
+    for (const r of [
+      page,
+      await call(port, "GET", "/api/status"),
+      await tool(port, "search_stations", { query: "alpha" }),
+      await call(port, "GET", "/nope"),
+      await call(port, "GET", "/", { headers: { host: "evil.example" } }),
+      await call(port, "OPTIONS", "/api/tools/search_stations", {
+        headers: { origin: "http://evil.example", "access-control-request-method": "POST" },
+      }),
+    ]) {
+      expectSecurityHeaders(r);
+    }
+    expect(page.headers["content-security-policy"]).toBe(
+      "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    );
+  });
+});
+
+describe("Host header (DNS rebinding)", () => {
+  it.each([
+    "evil.example",
+    "evil.example:PORT",
+    "127.0.0.1",
+    "127.0.0.1:1",
+    "localhost:1",
+    "0.0.0.0:PORT",
+    "[::1]:PORT",
+    "127.0.0.1:PORT.evil.example",
+  ])("rejects %s", async (h) => {
+    const { port } = await start();
+    for (const path of ["/", "/api/status"]) {
+      const r = await call(port, "GET", path, { headers: { host: h.replace("PORT", String(port)) } });
+      expect(r.status).toBe(403);
+      expect(r.json.error.code).toBe("BAD_HOST");
+    }
+  });
+
+  it("accepts 127.0.0.1:PORT and localhost:PORT", async () => {
+    const { port } = await start();
+    for (const host of [`127.0.0.1:${port}`, `localhost:${port}`, `LOCALHOST:${port}`]) {
+      const r = await call(port, "GET", "/api/status", { headers: { host, origin: `http://${host}` } });
+      expect(r.status).toBe(200);
+    }
+  });
+});
+
+describe("same-origin API", () => {
+  it("rejects requests without x-app: railways", async () => {
+    const { port } = await start();
+    for (const v of [undefined, "", "other"]) {
+      const r = await tool(port, "search_stations", { query: "alpha" }, { "x-app": v });
+      expect(r.status).toBe(403);
+      expect(r.json.error.code).toBe("FORBIDDEN");
+    }
+    expect((await call(port, "GET", "/api/status", { headers: { "x-app": undefined } })).status).toBe(403);
+  });
+
+  it("rejects another Origin and cross-site fetch metadata", async () => {
+    const { port, fake } = await start();
+    for (const headers of [
+      { origin: "http://evil.example" },
+      { origin: "null" },
+      { origin: `https://127.0.0.1:${port}` },
+      { origin: `http://localhost:${port}` }, // other host than the one in Host
+      { "sec-fetch-site": "cross-site" },
+      { "sec-fetch-site": "same-site" },
+    ]) {
+      const r = await tool(port, "get_route_availability", { from: "AAA", to: "DDD", date: D }, headers);
+      expect(r.status).toBe(403);
+      expect(r.json.error.code).toBe("FORBIDDEN");
+    }
+    expect(fake.reads).toEqual([]);
+  });
+
+  it("answers a same-origin call from the page", async () => {
+    const { port } = await start();
+    const r = await tool(port, "search_stations", { query: "alpha" });
+    expect(r.status).toBe(200);
+    expect(r.json.data.stations[0]).toMatchObject({ code: "AAA" });
+    expect(r.json.live_checks).toEqual({ used: 0, limit: 150 });
+  });
+});
+
+describe("tool allow-list", () => {
+  it("is exactly the five read-only tools in the spec", () => {
+    expect([...ALLOWED_TOOLS].sort()).toEqual([
+      "find_nearby_stations",
+      "get_data_sources",
+      "get_route_availability",
+      "plan_journey",
+      "search_stations",
+    ]);
+  });
+
+  it.each(["find_trains_between", "get_seat_availability", "get_fare", "get_train_schedule", "nonexistent", "__proto__"])(
+    "rejects %s",
+    async (name) => {
+      const { port } = await start();
+      const r = await tool(port, name, {});
+      expect(r.status).toBe(404);
+      expect(r.json.error.code).toBe("TOOL_NOT_ALLOWED");
+    },
+  );
+});
+
+describe("tool errors → HTTP status", () => {
+  it("maps codes to statuses", () => {
+    expect(httpStatusFor("INVALID_INPUT")).toBe(400);
+    expect(httpStatusFor("NOT_FOUND")).toBe(404);
+    expect(httpStatusFor("RATE_LIMITED")).toBe(429);
+    expect(httpStatusFor("UNSUPPORTED")).toBe(501);
+    expect(httpStatusFor("UPSTREAM_UNAVAILABLE")).toBe(502);
+    expect(httpStatusFor("UPSTREAM_AUTH")).toBe(502);
+    expect(httpStatusFor("DAILY_LIMIT")).toBe(429);
+  });
+
+  it("returns the tool's error code with its HTTP status", async () => {
+    const { port, fake } = await start();
+    fake.errors["AAA|DDD"] = new RailError("NOT_FOUND", "no trains on this synthetic route", "fake-live");
+    fake.errors["AAA|CCC"] = new RailError("UPSTREAM_UNAVAILABLE", "synthetic outage", "fake-live");
+    fake.errors["BBB|DDD"] = new RailError("RATE_LIMITED", "synthetic quota", "fake-live", 30);
+
+    const nf = await tool(port, "get_route_availability", { from: "AAA", to: "DDD", date: D });
+    expect(nf.status).toBe(404);
+    expect(nf.json.error).toMatchObject({ code: "NOT_FOUND", message: expect.stringContaining("synthetic route") });
+
+    const up = await tool(port, "get_route_availability", { from: "AAA", to: "CCC", date: D });
+    expect(up.status).toBe(502);
+    expect(up.json.error.code).toBe("UPSTREAM_UNAVAILABLE");
+
+    const rl = await tool(port, "get_route_availability", { from: "BBB", to: "DDD", date: D });
+    expect(rl.status).toBe(429);
+    expect(rl.json.error.code).toBe("RATE_LIMITED");
+    expect(rl.headers["retry-after"]).toBe("30");
+  });
+
+  it("returns 400 INVALID_INPUT for bad arguments and bad JSON", async () => {
+    const { port } = await start();
+    const badDate = await tool(port, "get_route_availability", { from: "AAA", to: "DDD", date: "2026-13-45" });
+    expect(badDate.status).toBe(400);
+    expect(badDate.json.error.code).toBe("INVALID_INPUT");
+    const badJson = await call(port, "POST", "/api/tools/search_stations", { body: "{not json" });
+    expect(badJson.status).toBe(400);
+    expect(badJson.json.error.code).toBe("INVALID_INPUT");
+  });
+
+  it("never sends a configured secret back", async () => {
+    const secret = "fc-synthetic-secret-123";
+    const { port, fake } = await start({ secrets: [secret] });
+    fake.errors["AAA|DDD"] = new RailError("UPSTREAM_AUTH", `key ${secret} was rejected`, "fake-live");
+    const r = await tool(port, "get_route_availability", { from: "AAA", to: "DDD", date: D });
+    expect(r.status).toBe(502);
+    expect(r.text).not.toContain(secret);
+    expect(r.text).toContain("[redacted]");
+  });
+});
+
+describe("per-minute limit", () => {
+  it("allows the configured number of API calls a minute, then answers 429 with Retry-After", async () => {
+    let t = 1_000_000;
+    const { port } = await start({ callsPerMinute: 3, nowMs: () => t });
+    for (let i = 0; i < 3; i++) expect((await call(port, "GET", "/api/status")).status).toBe(200);
+    const r = await call(port, "GET", "/api/status");
+    expect(r.status).toBe(429);
+    expect(r.json.error.code).toBe("TOO_MANY_REQUESTS");
+    expect(Number(r.headers["retry-after"])).toBeGreaterThan(0);
+    t += 60_001;
+    expect((await call(port, "GET", "/api/status")).status).toBe(200);
+  });
+});
+
+describe("daily live-check cap", () => {
+  it("counts only real page reads, refuses once used up, and resets at midnight IST", async () => {
+    // 23:00 IST = 17:30 UTC
+    let now = new Date("2026-11-20T17:30:00Z");
+    const { port, fake } = await start({ limit: 2, capNow: () => now });
+    const route = (to: string) => tool(port, "get_route_availability", { from: "AAA", to, date: D });
+
+    expect((await route("DDD")).json.live_checks).toEqual({ used: 1, limit: 2 });
+    expect((await route("DDD")).json.live_checks).toEqual({ used: 1, limit: 2 }); // cache hit: not counted
+    expect((await route("CCC")).json.live_checks).toEqual({ used: 2, limit: 2 });
+
+    const refused = await route("EEE");
+    expect(refused.status).toBe(429);
+    expect(refused.json.error.code).toBe("DAILY_LIMIT");
+    expect(fake.reads).toHaveLength(2);
+    expect((await call(port, "GET", "/api/status")).json.live_checks).toEqual({ used: 2, limit: 2 });
+
+    // non-live tools still work
+    expect((await tool(port, "search_stations", { query: "alpha" })).status).toBe(200);
+
+    now = new Date("2026-11-20T18:31:00Z"); // 00:01 IST next day
+    const after = await route("EEE");
+    expect(after.status).toBe(200);
+    expect(after.json.live_checks).toEqual({ used: 1, limit: 2 });
+  });
+
+  it("the hook itself refuses a read beyond the cap", () => {
+    const cap = new DailyReadCap(1);
+    cap.beforeRead();
+    expect(() => cap.beforeRead()).toThrow(RailError);
+    expect(cap.used()).toBe(1);
+  });
+
+  it("railyatri calls beforeRead before a real Firecrawl read, not on a cache hit, and a refusal stops the read", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ success: false, error: "synthetic" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchFn);
+    const cap = new DailyReadCap(1);
+    const hook = vi.fn(cap.beforeRead);
+    const cache = new TtlCache<RouteAvailability>();
+    const p = new RailYatriProvider({ apiKey: "test-key", minIntervalMs: 0, retries: 0, cache, beforeRead: hook });
+
+    // a cached route never reaches the hook
+    cache.set(`AAA|DDD|${D}`, { from_code: "AAA", to_code: "DDD", date: D, quota: "GN", trains: [TRAIN], observed_at: "x" }, 60_000);
+    await p.routeAvailability({ from: "AAA", to: "DDD", date: D });
+    expect(hook).not.toHaveBeenCalled();
+
+    // a miss calls the hook, then Firecrawl
+    await expect(p.routeAvailability({ from: "AAA", to: "CCC", date: D })).rejects.toBeInstanceOf(RailError);
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    // over the cap: the hook throws and Firecrawl is not called
+    await expect(p.routeAvailability({ from: "AAA", to: "EEE", date: D })).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("daily count survives restarts", () => {
+  const dirs: string[] = [];
+  const stateFile = () => {
+    const dir = mkdtempSync(join(tmpdir(), "rsf-cap-"));
+    dirs.push(dir);
+    return join(dir, "state", "live-checks.json");
+  };
+  afterEach(() => {
+    vi.restoreAllMocks();
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  const at = (iso: string) => () => new Date(iso);
+  const evening = at("2026-11-20T17:30:00Z"); // 23:00 IST
+
+  it("a new app process continues today's count from the file and keeps the cap", () => {
+    const file = stateFile();
+    const first = new DailyReadCap(3, evening, new FileCapStore(file));
+    first.beforeRead();
+    first.beforeRead();
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ day: "2026-11-20", count: 2 });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+
+    const restarted = new DailyReadCap(3, evening, new FileCapStore(file));
+    expect(restarted.used()).toBe(2);
+    restarted.beforeRead();
+    expect(() => restarted.beforeRead()).toThrow(RailError);
+    expect(new DailyReadCap(3, evening, new FileCapStore(file)).remaining()).toBe(0);
+  });
+
+  it("a count saved on an earlier IST day does not carry over", () => {
+    const file = stateFile();
+    const yesterday = new DailyReadCap(3, evening, new FileCapStore(file));
+    for (let i = 0; i < 3; i++) yesterday.beforeRead();
+    const nextDay = new DailyReadCap(3, at("2026-11-20T18:31:00Z"), new FileCapStore(file)); // 00:01 IST on the 21st
+    expect(nextDay.used()).toBe(0);
+    nextDay.beforeRead();
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ day: "2026-11-21", count: 1 });
+  });
+
+  it("two app instances sharing the file don't undercount", () => {
+    const file = stateFile();
+    const a = new DailyReadCap(10, evening, new FileCapStore(file));
+    const b = new DailyReadCap(10, evening, new FileCapStore(file));
+    a.beforeRead();
+    a.beforeRead();
+    b.beforeRead(); // sees a's 2 first
+    expect(a.used()).toBe(3);
+    expect(b.used()).toBe(3);
+  });
+
+  it("a malformed file is reported once, counted from 0, and then rewritten", () => {
+    const file = stateFile();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    new FileCapStore(file).save({ day: "2026-11-20", count: 1 });
+    for (const bad of ["{not json", JSON.stringify({ day: "2026-11-20", count: -4 }), JSON.stringify({ day: "yesterday", count: 2 })]) {
+      writeFileSync(file, bad);
+      const cap = new DailyReadCap(3, evening, new FileCapStore(file));
+      expect(cap.used()).toBe(0);
+      cap.beforeRead();
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ day: "2026-11-20", count: 1 });
+    }
+    expect(warn).toHaveBeenCalledTimes(3); // once per store, not once per read
+  });
+
+  it("the API reports the restored count", async () => {
+    const file = stateFile();
+    new FileCapStore(file).save({ day: todayInIndia(), count: 7 });
+    const cap = new DailyReadCap(150, undefined, new FileCapStore(file));
+    const ctx = buildContext(loadConfig({ GEOCODER: "off" }), { timetables: [sampleProvider()] });
+    const server = createLocalApp(ctx, { cap }).listen(0, "127.0.0.1");
+    servers.push(server);
+    await new Promise((r) => server.once("listening", r));
+    const port = (server.address() as AddressInfo).port;
+    expect((await call(port, "GET", "/api/status")).json.live_checks).toEqual({ used: 7, limit: 150 });
+  });
+});
+
+describe("extra hardening", () => {
+  it("API answers are never cached", async () => {
+    const { port } = await start();
+    expect((await call(port, "GET", "/api/status")).headers["cache-control"]).toBe("no-store");
+    expect((await tool(port, "search_stations", { query: "alpha" })).headers["cache-control"]).toBe("no-store");
+  });
+
+  it("each endpoint accepts only its own method, and the page is read-only", async () => {
+    const { port } = await start();
+    const getTool = await call(port, "GET", "/api/tools/search_stations");
+    expect(getTool.status).toBe(405);
+    expect(getTool.headers.allow).toBe("POST");
+    expect(getTool.json.error.code).toBe("METHOD_NOT_ALLOWED");
+    const postStatus = await call(port, "POST", "/api/status", { body: {} });
+    expect(postStatus.status).toBe(405);
+    expect(postStatus.headers.allow).toBe("GET");
+    for (const m of ["POST", "PUT", "DELETE"]) {
+      const r = await call(port, m, "/", { body: {} });
+      expect(r.status).toBe(405);
+      expectSecurityHeaders(r);
+    }
+  });
+
+  it("refuses tool calls that aren't plain JSON", async () => {
+    const { port, fake } = await start();
+    const send = (headers: Record<string, string>, body: string | Buffer) =>
+      new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port,
+            method: "POST",
+            path: "/api/tools/get_route_availability",
+            headers: { host: `127.0.0.1:${port}`, "x-app": "railways", ...headers },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve(res.statusCode ?? 0));
+          },
+        );
+        req.on("error", reject);
+        req.end(body);
+      });
+    const args = JSON.stringify({ from: "AAA", to: "DDD", date: D });
+    expect(await send({ "content-type": "text/plain" }, args)).toBe(415);
+    expect(await send({ "content-type": "application/x-www-form-urlencoded" }, "from=AAA")).toBe(415);
+    expect(await send({}, args)).toBe(415);
+    // compressed bodies are refused, not inflated
+    const { gzipSync } = await import("node:zlib");
+    expect(await send({ "content-type": "application/json", "content-encoding": "gzip" }, gzipSync(args))).toBe(400);
+    // oversized bodies are refused
+    expect(await send({ "content-type": "application/json" }, JSON.stringify({ from: "AAA", pad: "x".repeat(20_000) }))).toBe(400);
+    expect(fake.reads).toEqual([]);
+  });
+
+  it(`runs at most ${MAX_CONCURRENT_LIVE_CALLS} live tool calls at once and refuses the rest`, async () => {
+    const { port, fake } = await start();
+    let open!: () => void;
+    fake.gate = new Promise((r) => (open = r));
+    const held = ["DDD", "CCC"].map((to) => tool(port, "get_route_availability", { from: "AAA", to, date: D }));
+    await vi.waitFor(() => expect(fake.waiting).toBe(MAX_CONCURRENT_LIVE_CALLS));
+
+    const refused = await tool(port, "get_route_availability", { from: "AAA", to: "EEE", date: D });
+    expect(refused.status).toBe(429);
+    expect(refused.json.error.code).toBe("BUSY");
+    // non-live tools are not held up
+    expect((await tool(port, "search_stations", { query: "alpha" })).status).toBe(200);
+
+    open();
+    expect((await Promise.all(held)).map((r) => r.status)).toEqual([200, 200]);
+    expect((await tool(port, "get_route_availability", { from: "AAA", to: "EEE", date: D })).status).toBe(200);
+  });
+});
