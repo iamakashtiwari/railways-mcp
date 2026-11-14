@@ -8,6 +8,7 @@ import {
   ALLOWED_TOOLS,
   DailyReadCap,
   FileCapStore,
+  MAX_CONCURRENT_LIVE_CALLS,
   SECURITY_HEADERS,
   createLocalApp,
   httpStatusFor,
@@ -53,12 +54,20 @@ class FakeRoute implements RouteAvailabilitySource {
   };
   readonly reads: string[] = [];
   errors: Record<string, RailError> = {};
+  /** When set, reads wait for it (to hold calls in flight). */
+  gate: Promise<void> | null = null;
+  waiting = 0;
   private readonly cache = new Map<string, RouteAvailability>();
 
   constructor(private readonly beforeRead?: () => void) {}
 
   async routeAvailability(q: RouteAvailabilityQuery): Promise<RouteAvailability> {
     const key = `${q.from}|${q.to}|${q.date}`;
+    if (this.gate) {
+      this.waiting++;
+      await this.gate;
+      this.waiting--;
+    }
     const err = this.errors[`${q.from}|${q.to}`];
     if (err) throw err;
     const hit = this.cache.get(key);
@@ -466,5 +475,79 @@ describe("daily count survives restarts", () => {
     await new Promise((r) => server.once("listening", r));
     const port = (server.address() as AddressInfo).port;
     expect((await call(port, "GET", "/api/status")).json.live_checks).toEqual({ used: 7, limit: 150 });
+  });
+});
+
+describe("extra hardening", () => {
+  it("API answers are never cached", async () => {
+    const { port } = await start();
+    expect((await call(port, "GET", "/api/status")).headers["cache-control"]).toBe("no-store");
+    expect((await tool(port, "search_stations", { query: "alpha" })).headers["cache-control"]).toBe("no-store");
+  });
+
+  it("each endpoint accepts only its own method, and the page is read-only", async () => {
+    const { port } = await start();
+    const getTool = await call(port, "GET", "/api/tools/search_stations");
+    expect(getTool.status).toBe(405);
+    expect(getTool.headers.allow).toBe("POST");
+    expect(getTool.json.error.code).toBe("METHOD_NOT_ALLOWED");
+    const postStatus = await call(port, "POST", "/api/status", { body: {} });
+    expect(postStatus.status).toBe(405);
+    expect(postStatus.headers.allow).toBe("GET");
+    for (const m of ["POST", "PUT", "DELETE"]) {
+      const r = await call(port, m, "/", { body: {} });
+      expect(r.status).toBe(405);
+      expectSecurityHeaders(r);
+    }
+  });
+
+  it("refuses tool calls that aren't plain JSON", async () => {
+    const { port, fake } = await start();
+    const send = (headers: Record<string, string>, body: string | Buffer) =>
+      new Promise<number>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port,
+            method: "POST",
+            path: "/api/tools/get_route_availability",
+            headers: { host: `127.0.0.1:${port}`, "x-app": "railways", ...headers },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve(res.statusCode ?? 0));
+          },
+        );
+        req.on("error", reject);
+        req.end(body);
+      });
+    const args = JSON.stringify({ from: "AAA", to: "DDD", date: D });
+    expect(await send({ "content-type": "text/plain" }, args)).toBe(415);
+    expect(await send({ "content-type": "application/x-www-form-urlencoded" }, "from=AAA")).toBe(415);
+    expect(await send({}, args)).toBe(415);
+    // compressed bodies are refused, not inflated
+    const { gzipSync } = await import("node:zlib");
+    expect(await send({ "content-type": "application/json", "content-encoding": "gzip" }, gzipSync(args))).toBe(400);
+    // oversized bodies are refused
+    expect(await send({ "content-type": "application/json" }, JSON.stringify({ from: "AAA", pad: "x".repeat(20_000) }))).toBe(400);
+    expect(fake.reads).toEqual([]);
+  });
+
+  it(`runs at most ${MAX_CONCURRENT_LIVE_CALLS} live tool calls at once and refuses the rest`, async () => {
+    const { port, fake } = await start();
+    let open!: () => void;
+    fake.gate = new Promise((r) => (open = r));
+    const held = ["DDD", "CCC"].map((to) => tool(port, "get_route_availability", { from: "AAA", to, date: D }));
+    await vi.waitFor(() => expect(fake.waiting).toBe(MAX_CONCURRENT_LIVE_CALLS));
+
+    const refused = await tool(port, "get_route_availability", { from: "AAA", to: "EEE", date: D });
+    expect(refused.status).toBe(429);
+    expect(refused.json.error.code).toBe("BUSY");
+    // non-live tools are not held up
+    expect((await tool(port, "search_stations", { query: "alpha" })).status).toBe(200);
+
+    open();
+    expect((await Promise.all(held)).map((r) => r.status)).toEqual([200, 200]);
+    expect((await tool(port, "get_route_availability", { from: "AAA", to: "EEE", date: D })).status).toBe(200);
   });
 });

@@ -120,6 +120,12 @@ npm run app
 
 `npm run app` runs `tsx --env-file=.env src/app.ts`; the server itself does not read `.env`.
 
+**Footprint.** About 120 MB on disk (`node_modules` 114 MB, of which 26 MB is needed to run; the rest is build and test tools), plus 4.6 MB of timetable data. While running it uses roughly 200–400 MB of memory, most of it the archived 2016 station dataset that makes about 8,200 smaller stations searchable; when stopped (Ctrl+C) it uses nothing. A lighter way to run, as one `node` process without npm and tsx in between (saves about 100 MB):
+
+```bash
+npm run build && node --env-file=.env dist/src/app.js
+```
+
 | Variable | Purpose |
 |---|---|
 | `APP_PORT` | Port on 127.0.0.1 (default `4321`) |
@@ -135,7 +141,11 @@ Each live check is one Firecrawl page read on your key. Opening a results page i
 - Listens on `127.0.0.1` only, and rejects requests whose `Host` header isn't `127.0.0.1:PORT` or `localhost:PORT` (DNS rebinding).
 - The API answers only same-origin requests carrying `x-app: railways` (checked together with `Origin` and `Sec-Fetch-Site`) and sends no CORS headers.
 - Strict Content Security Policy, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`; no third-party scripts, fonts, CDNs or analytics. All text from the server is inserted with `textContent`.
-- The API can call only `search_stations`, `find_nearby_stations`, `get_route_availability`, `plan_journey` and `get_data_sources`, at most 120 times a minute.
+- The API can call only `search_stations`, `find_nearby_stations`, `get_route_availability`, `plan_journey` and `get_data_sources`, at most 120 times a minute, with at most 2 live checks running at once (more are refused, not queued).
+- Each endpoint accepts one method; tool calls must be `application/json`, at most 16 KB and not compressed. API answers are sent with `Cache-Control: no-store`.
+- Extra isolation headers: `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy`, `Origin-Agent-Cluster`, and a `Permissions-Policy` that switches off camera, microphone, location, payment and similar features.
+- Clients that stall while sending a request are cut off (10 s for headers, 15 s for the whole request); slow answers are not affected.
+- The app refuses to start as root or when `.env` is readable by other users.
 - The Firecrawl key stays in `.env`: it is never logged or sent to the browser.
 
 The app never books, logs in to IRCTC, or handles CAPTCHA, OTP or payment. Live seats come from an unofficial source (see [DISCLAIMER.md](DISCLAIMER.md)): always confirm on IRCTC before booking.

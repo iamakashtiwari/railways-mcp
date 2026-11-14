@@ -10,7 +10,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -44,11 +44,32 @@ export const SECURITY_HEADERS: Readonly<Record<string, string>> = {
   "X-Frame-Options": "DENY",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
+  // Beyond the spec's list: isolate the page from other windows and origins, and switch off powerful browser features.
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Resource-Policy": "same-origin",
+  "Origin-Agent-Cluster": "?1",
+  "Permissions-Policy":
+    "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=(), browsing-topics=()",
+  "X-DNS-Prefetch-Control": "off",
+  "X-Permitted-Cross-Domain-Policies": "none",
 };
+
+/** Live tool calls allowed at the same time; more are refused rather than queued, so a burst can't spend live checks. */
+export const MAX_CONCURRENT_LIVE_CALLS = 2;
 
 /** Error codes the API returns: the tools' RailError codes plus the app's own. */
 export type ApiErrorCode =
-  RailError["code"] | "BAD_HOST" | "FORBIDDEN" | "TOOL_NOT_ALLOWED" | "TOO_MANY_REQUESTS" | "DAILY_LIMIT" | "NOT_FOUND_ROUTE" | "INTERNAL";
+  | RailError["code"]
+  | "BAD_HOST"
+  | "FORBIDDEN"
+  | "TOOL_NOT_ALLOWED"
+  | "TOO_MANY_REQUESTS"
+  | "DAILY_LIMIT"
+  | "BUSY"
+  | "UNSUPPORTED_MEDIA_TYPE"
+  | "METHOD_NOT_ALLOWED"
+  | "NOT_FOUND_ROUTE"
+  | "INTERNAL";
 
 const STATUS: Record<ApiErrorCode, number> = {
   INVALID_INPUT: 400,
@@ -62,6 +83,9 @@ const STATUS: Record<ApiErrorCode, number> = {
   TOOL_NOT_ALLOWED: 404,
   TOO_MANY_REQUESTS: 429,
   DAILY_LIMIT: 429,
+  BUSY: 429,
+  UNSUPPORTED_MEDIA_TYPE: 415,
+  METHOD_NOT_ALLOWED: 405,
   NOT_FOUND_ROUTE: 404,
   INTERNAL: 500,
 };
@@ -260,7 +284,7 @@ export function createLocalApp(ctx: AppContext, options: LocalAppOptions): Expre
   const send = (res: Response, status: number, body: unknown): void => {
     let text = JSON.stringify(body);
     for (const s of secrets) text = text.split(s).join("[redacted]");
-    res.status(status).type("application/json").send(text);
+    res.status(status).set("Cache-Control", "no-store").type("application/json").send(text);
   };
   const sendError = (res: Response, err: ApiError): void => {
     if (err.retry_after_seconds) res.set("Retry-After", String(err.retry_after_seconds));
@@ -318,11 +342,29 @@ export function createLocalApp(ctx: AppContext, options: LocalAppOptions): Expre
     next();
   });
 
-  api.use(express.json({ limit: "16kb" }));
+  // Only the two endpoints, each with its one method.
+  api.use((req, res, next) => {
+    const allowed = req.path === "/status" ? "GET" : /^\/tools\/[^/]+$/.test(req.path) ? "POST" : null;
+    if (allowed && req.method !== allowed) {
+      res.set("Allow", allowed);
+      sendError(res, { code: "METHOD_NOT_ALLOWED", message: `Use ${allowed} for this endpoint.` });
+      return;
+    }
+    if (req.method === "POST" && !req.is("application/json")) {
+      sendError(res, { code: "UNSUPPORTED_MEDIA_TYPE", message: "Send the tool arguments as application/json." });
+      return;
+    }
+    next();
+  });
+
+  // Small, uncompressed, object-or-array JSON only (compressed bodies are refused outright).
+  api.use(express.json({ limit: "16kb", inflate: false, strict: true }));
 
   api.get("/status", (_req, res) => {
     send(res, 200, { live_checks: liveChecks(), resets: "midnight IST" });
   });
+
+  let liveInFlight = 0;
 
   api.post("/tools/:name", async (req: Request, res: Response) => {
     const name = String(req.params.name);
@@ -339,13 +381,21 @@ export function createLocalApp(ctx: AppContext, options: LocalAppOptions): Expre
       sendError(res, { code: "DAILY_LIMIT", message: `All ${cap.limit} live checks for today are used; they reset at midnight IST.` });
       return;
     }
+    const live = LIVE_TOOLS.has(name);
+    if (live && liveInFlight >= MAX_CONCURRENT_LIVE_CALLS) {
+      sendError(res, { code: "BUSY", message: "Other live checks are still running; try again when they finish.", retry_after_seconds: 5 });
+      return;
+    }
     let result: Awaited<ReturnType<Client["callTool"]>>;
+    if (live) liveInFlight++;
     try {
       result = await (await client()).callTool({ name, arguments: args as Record<string, unknown> }, undefined, { timeout: 180_000 });
     } catch (e) {
       console.error(`tool ${name} failed:`, e instanceof Error ? e.message : String(e));
       sendError(res, { code: "INTERNAL", message: "The tool call failed inside the app." });
       return;
+    } finally {
+      if (live) liveInFlight--;
     }
     const first = Array.isArray(result.content) ? result.content[0] : undefined;
     const text = first && first.type === "text" ? first.text : "";
@@ -390,7 +440,12 @@ export function createLocalApp(ctx: AppContext, options: LocalAppOptions): Expre
   });
 
   app.use("/api", api);
-  app.use(express.static(webDir, { dotfiles: "deny", index: "index.html", etag: false }));
+  // The page itself is read-only.
+  app.use((req, res, next) => {
+    if (req.method === "GET" || req.method === "HEAD") return next();
+    res.status(405).set("Allow", "GET, HEAD").type("text/plain").send("Method not allowed");
+  });
+  app.use(express.static(webDir, { dotfiles: "deny", index: "index.html", etag: false, redirect: false }));
   app.use((_req, res) => {
     res.status(404).type("text/plain").send("Not found");
   });
@@ -406,7 +461,22 @@ function intSetting(name: string, value: string | undefined, fallback: number, m
   return n;
 }
 
+/** Refuses unsafe setups before anything starts: running as root, or a .env others can read. */
+function startupChecks(): void {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    throw new Error("Refusing to run as root. Start the app as your normal user.");
+  }
+  const envFile = ".env";
+  if (existsSync(envFile)) {
+    const mode = statSync(envFile).mode & 0o777;
+    if (mode & 0o077) {
+      throw new Error(`.env can be read by other users (mode ${mode.toString(8)}). Run: chmod 600 .env`);
+    }
+  }
+}
+
 async function main(): Promise<void> {
+  startupChecks();
   const port = intSetting("APP_PORT", process.env.APP_PORT, DEFAULT_PORT, 1, 65_535);
   const limit = intSetting("APP_DAILY_PAGE_READS", process.env.APP_DAILY_PAGE_READS, DEFAULT_DAILY_PAGE_READS, 0, 100_000);
   const cfg = loadConfig();
@@ -418,6 +488,12 @@ async function main(): Promise<void> {
   }
   const app = createLocalApp(ctx, { cap, secrets: [cfg.firecrawl.apiKey] });
   const server: Server = app.listen(port, LISTEN_HOST);
+  // Tight limits on how long a client may take to send a request, and on idle connections.
+  server.headersTimeout = 10_000;
+  server.requestTimeout = 15_000;
+  server.keepAliveTimeout = 5_000;
+  server.maxHeadersCount = 50;
+  server.maxConnections = 64;
   server.on("listening", () => console.log(`Rail Seat Finder: http://${LISTEN_HOST}:${port}/ (live checks today: ${cap.used()}/${limit})`));
   server.on("error", (e) => {
     console.error(`Could not listen on ${LISTEN_HOST}:${port}: ${e.message}`);
