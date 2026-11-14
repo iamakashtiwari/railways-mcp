@@ -30,6 +30,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/src/server.js",
     "dev": "tsx watch src/server.ts",
+    "app": "tsx src/app.ts",
     "build:data": "tsx scripts/build-snapshot.ts",
     "test": "vitest run",
     "typecheck": "tsc -p . --noEmit",

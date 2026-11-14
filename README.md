@@ -98,6 +98,26 @@ How it works and what it guards against:
 - `plan_journey` connections come from the official timetable (one change, layover 2–10 h by default) and each leg is checked live on the date you'd actually board it. Each leg is a separate ticket: a late first train does not protect the second.
 - `npm run smoke -- railyatri` checks the live page layout end to end.
 
+## Private web app (Rail Seat Finder)
+
+A plain, fast search page for your own computer: live seats for every train on a route, a 7-day date strip, and "other ways to go" (one change of train, plus nearby stations you pick). No framework, no build step, no third-party scripts.
+
+```bash
+bash scripts/setup-local.sh   # first time: installs, asks for your Firecrawl key (hidden), starts the app
+npm run app                   # every time after → http://127.0.0.1:4321
+```
+
+The setup script stores the key only in `.env` (git-ignored, permissions 600) and turns on the `railyatri` source.
+
+Safety model:
+- Listens on `127.0.0.1` only, so no other device can connect. The Host header must be `127.0.0.1`/`localhost` (blocks DNS rebinding).
+- The API answers only same-origin requests that carry the app's own header, so other websites open in your browser can't call it.
+- Strict Content-Security-Policy (`default-src 'none'`), no framing, no referrer. Scraped text is inserted as text, never as HTML.
+- Only a fixed list of read-only tools can be called.
+- `APP_DAILY_PAGE_READS` (default 150) caps live page reads per day (IST) to protect your Firecrawl credits; the header shows usage. `APP_PORT` changes the port (default 4321).
+
+Booking always happens on IRCTC or RailYatri: the app only links there.
+
 ## Run locally with Docker (recommended)
 
 ```bash

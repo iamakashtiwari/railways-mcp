@@ -136,7 +136,10 @@ function headOfChain(ct: ConfirmTktProvider): TrainsBetweenSource {
   };
 }
 
-export function buildContext(cfg: Config, overrides: { timetables?: LocalTimetableProvider[]; codes?: StationCodes } = {}): AppContext {
+export function buildContext(
+  cfg: Config,
+  overrides: { timetables?: LocalTimetableProvider[]; codes?: StationCodes; beforePageRead?: () => void } = {},
+): AppContext {
   const codes = overrides.codes ?? StationCodes.fromFile(join(cfg.dataDir, "station_equivalences.json"));
   const timetables =
     overrides.timetables ??
@@ -160,7 +163,12 @@ export function buildContext(cfg: Config, overrides: { timetables?: LocalTimetab
   const er = cfg.unofficial.has("erail") ? new ERailProvider({ routeKey: cfg.erailRouteKey! }) : null;
   const railradar = cfg.unofficial.has("railradar") ? new RailRadarProvider() : null;
   const railyatri = cfg.unofficial.has("railyatri")
-    ? new RailYatriProvider({ apiKey: cfg.firecrawl.apiKey!, apiUrl: cfg.firecrawl.apiUrl, waitMs: cfg.firecrawl.waitMs })
+    ? new RailYatriProvider({
+        apiKey: cfg.firecrawl.apiKey!,
+        apiUrl: cfg.firecrawl.apiUrl,
+        waitMs: cfg.firecrawl.waitMs,
+        beforeRead: overrides.beforePageRead,
+      })
     : null;
   const history = [
     cfg.unofficial.has("etrain") ? new ETrainProvider() : null, // per-run, dated history: primary
