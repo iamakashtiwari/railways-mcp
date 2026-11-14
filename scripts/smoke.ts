@@ -16,6 +16,7 @@ import { ERailProvider } from "../src/providers/unofficial/erail.js";
 import { ETrainProvider } from "../src/providers/unofficial/etrain.js";
 import { NtesProvider } from "../src/providers/unofficial/ntes.js";
 import { RailRadarProvider } from "../src/providers/unofficial/railradar.js";
+import { RailYatriProvider } from "../src/providers/unofficial/railyatri.js";
 import { USER_AGENT } from "../src/lib/http.js";
 
 /** A long-running daily train and stations it serves; stable across timetable revisions. */
@@ -52,6 +53,18 @@ const checks: Record<string, () => Promise<string>> = {
       "station search lost BPL or its coordinates",
     );
     return `${legs.length} trains ${FROM}→${TO} on ${date}; station search ok`;
+  },
+  railyatri: async () => {
+    const p = new RailYatriProvider({ apiKey: need("FIRECRAWL_API_KEY"), apiUrl: process.env.FIRECRAWL_API_URL?.trim() || undefined });
+    const date = addDays(todayInIndia(), 7);
+    const r = await p.routeAvailability({ from: FROM, to: TO, date });
+    const running = r.trains.filter((t) => t.runs_on_date);
+    assert(running.length > 0, `no trains running ${FROM}→${TO} on ${date}`);
+    const cells = running.flatMap((t) => t.classes);
+    assert(cells.length > 0, "no class cells parsed");
+    const known = cells.filter((c) => c.category !== "unknown").length;
+    assert(known / cells.length >= 0.5, `only ${known}/${cells.length} class cells had a recognised status`);
+    return `${running.length} trains ${FROM}→${TO} on ${date}; ${known}/${cells.length} class cells with a status`;
   },
   erail: async () => {
     const p = new ERailProvider({ routeKey: need("ERAIL_ROUTE_KEY") });

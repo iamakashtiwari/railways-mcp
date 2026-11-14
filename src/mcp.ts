@@ -3,6 +3,7 @@ import { registerBookingTools } from "./tools/booking.js";
 import type { AppContext } from "./config.js";
 import { registerJourneyTools } from "./tools/journeys.js";
 import { registerMetaTools } from "./tools/meta.js";
+import { registerPlannerTools } from "./tools/planner.js";
 import { registerPunctualityTools } from "./tools/punctuality.js";
 import { registerStationTools } from "./tools/stations.js";
 import { registerTrainTools } from "./tools/trains.js";
@@ -12,6 +13,7 @@ export const SERVER_INFO = { name: "indian-railways", version: packageVersion() 
 
 const INSTRUCTIONS = `Indian Railways timetables, journey planning, punctuality history and (when configured) seat availability and fares.
 - Tools take station codes (e.g. NDLS) and train numbers; search_stations / search_trains / find_nearby_stations resolve names and places.
+- get_route_availability lists live seat availability for every train and class on a route and date in one call; plan_journey ranks direct trains, alternative destinations and one-change journeys by live availability (both need the railyatri source).
 - get_punctuality gives a train's delay history per station (how late it usually runs).
 - Building blocks for journey planning: find_trains_between (direct), get_station_trains (trains through a junction, filterable by direction), find_connections (2–3 train journeys), get_train_schedule (full route), find_nearby_stations (alternative stations).
 - Every response has a "source" object: data_as_of and possibly_outdated show how current the data is. Timetable times are scheduled times; punctuality figures are historical delays.
@@ -30,6 +32,7 @@ export function createMcpServer(ctx: AppContext): McpServer {
   registerTrainTools(server, ctx);
   registerJourneyTools(server, ctx);
   registerBookingTools(server, ctx);
+  registerPlannerTools(server, ctx);
   registerPunctualityTools(server, ctx);
   registerMetaTools(server, ctx);
   return server;

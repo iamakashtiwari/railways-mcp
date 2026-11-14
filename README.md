@@ -42,6 +42,8 @@ Design documentation, with C4, UML sequence/class/deployment and flowchart diagr
 | `get_station_trains` | Station board. Filters: time window, date, `towards` / `coming_from` (direction) |
 | `find_connections` | Journeys of 2–3 trains with layover bounds, `via`, max total time and running-day compatibility (`works_on`). Pointless changes are removed |
 | `get_punctuality` | Delay history per station over 1w/1m/3m/6m/1y: runs counted, period, average/median/max delay, share within 15 min, over 30 min and over 60 min. Cross-checked between sources within ±10 min |
+| `get_route_availability` | **Live** availability for every train and class on a route and date in one call: status, seat/RAC/waitlist number, fare, confirmation-chance label (needs `railyatri`) |
+| `plan_journey` | Ranks direct trains, alternative destinations and one-change journeys by **live** availability: confirmed direct → confirmed connection → confirmed alternative destination → RAC → waitlist (smallest first). Each connection leg is checked live on its own boarding date (needs `railyatri`) |
 | `get_seat_availability` | Availability per class and quota (needs an availability source) |
 | `get_fare` | Fares per class and quota (needs a fare source) |
 | `get_data_sources` | Active sources, freshness, disabled capabilities, today's date in IST |
@@ -60,12 +62,15 @@ All tools are read-only and annotated `readOnlyHint: true`.
 | **RailRadar** | Unofficial internal endpoint | Average delay per station (window unstated) and scheduled times per halt, used as cross-checks for punctuality and schedules | Off; `…=railradar` |
 | **ConfirmTkt** web-app API | Unofficial, undocumented | Current trains between stations and schedules, cached availability and fares, station search | Off; `ENABLE_UNOFFICIAL_SOURCES=confirmtkt` |
 | **eRail** | Unofficial, undocumented | Current schedules and trains between stations | Off; `ENABLE_UNOFFICIAL_SOURCES=erail` |
+| **RailYatri** public route page, read through [Firecrawl](https://firecrawl.dev) with your own API key | Unofficial (public web page) | **Live** general-quota availability, fares and confirmation-chance labels for every train on a route | Off; `ENABLE_UNOFFICIAL_SOURCES=railyatri` + `FIRECRAWL_API_KEY` |
 
 Priority per capability, first answer wins:
 - stations: official → archived → ConfirmTkt
 - schedule: official → eRail → RailRadar → ConfirmTkt → archived
 - trains between: official → ConfirmTkt → eRail → archived
-- availability and fares: ConfirmTkt (when enabled)
+- availability: RailYatri (live) → ConfirmTkt (cached snapshot)
+- route availability and journey planning: RailYatri
+- fares: ConfirmTkt (when enabled)
 - delay history: etrain → NTES → RailRadar. The first that answers is the primary; the others cross-check it.
 
 When an answer comes from a lower-priority source, `source.notes` says why.
@@ -74,6 +79,24 @@ When an answer comes from a lower-priority source, `source.notes` says why.
 
 **About the unofficial sources.** Indian Railways publishes no free public API for availability, fares or delay history. ConfirmTkt and eRail are undocumented endpoints of third-party sites. They may change without notice, and using them may breach those sites' terms. They ship disabled; enable them only if you've decided that's acceptable for your use. With them disabled, those tools return `UNSUPPORTED` with instructions.
 
+
+### Live availability and journey planning (RailYatri via Firecrawl)
+
+```bash
+ENABLE_UNOFFICIAL_SOURCES=railyatri
+FIRECRAWL_API_KEY=fc-...           # your own key; each route read is one Firecrawl page scrape
+# FIRECRAWL_API_URL=http://localhost:3002   # optional: self-hosted Firecrawl
+# RAILYATRI_WAIT_MS=10000                   # optional: wait for availability to render (busy routes may need more)
+```
+
+How it works and what it guards against:
+- One page read returns every train and class on a route for a date, so `get_route_availability` costs one scrape, and `plan_journey` costs one per route it checks (`lookups_used` reports it). Reads are cached for 90 s.
+- The page converts the date using the browser's time zone, so outside India it silently shows the *previous* day. Requests ask Firecrawl for an Indian location, and the parser **checks the date the page shows and discards a mismatch** rather than returning another day's seats.
+- Trains from nearby terminals (e.g. ANVT and DLI for NDLS) are included with their own boarding codes. Trains that run on other weekdays are flagged `runs_on_date: false` and left out of planning.
+- On busy routes (60+ trains) some class cells may still be loading when the page is read; they are reported as `unknown` and counted in `summary.not_loaded`, never guessed. A longer `RAILYATRI_WAIT_MS` reduces this.
+- General quota only. Tatkal availability is not shown by this source.
+- `plan_journey` connections come from the official timetable (one change, layover 2–10 h by default) and each leg is checked live on the date you'd actually board it. Each leg is a separate ticket: a late first train does not protect the second.
+- `npm run smoke -- railyatri` checks the live page layout end to end.
 
 ## Run locally with Docker (recommended)
 

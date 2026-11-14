@@ -144,3 +144,21 @@ describe("server version", () => {
     expect(SERVER_INFO.version).toBe(pkg.version);
   });
 });
+
+describe("railyatri source", () => {
+  it("needs FIRECRAWL_API_KEY", () => {
+    expect(() => loadConfig({ ENABLE_UNOFFICIAL_SOURCES: "railyatri" })).toThrow(/FIRECRAWL_API_KEY must be set/);
+  });
+
+  it("validates RAILYATRI_WAIT_MS", () => {
+    expect(() => loadConfig({ RAILYATRI_WAIT_MS: "99999" })).toThrow(/RAILYATRI_WAIT_MS/);
+    expect(loadConfig({ RAILYATRI_WAIT_MS: "5000" }).firecrawl.waitMs).toBe(5000);
+  });
+
+  it("serves route availability and goes ahead of ConfirmTkt for single-train availability", () => {
+    const env = { ...CT, ENABLE_UNOFFICIAL_SOURCES: "confirmtkt,railyatri", FIRECRAWL_API_KEY: "test-key" };
+    expect(order(env, "route_availability")).toEqual(["railyatri"]);
+    expect(order(env, "availability")).toEqual(["railyatri", "confirmtkt"]);
+    expect(order({ GEOCODER: "off" }, "route_availability")).toEqual([]);
+  });
+});

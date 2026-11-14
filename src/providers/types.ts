@@ -11,9 +11,10 @@
  *  - Throw RailError("UPSTREAM_UNAVAILABLE" | "RATE_LIMITED" | "UPSTREAM_AUTH") on upstream failure.
  *  - Never return placeholder, estimated-as-actual, or invented values.
  */
-import type { DelayHistory, Fare, Leg, SeatAvailability, Station, TrainSchedule, TrainSummary } from "../core/types.js";
+import type { DelayHistory, Fare, Leg, RouteAvailability, SeatAvailability, Station, TrainSchedule, TrainSummary } from "../core/types.js";
 
-export type Capability = "stations" | "schedule" | "trains_between" | "station_index" | "punctuality" | "availability" | "fare" | "geocode";
+export type Capability =
+  "stations" | "schedule" | "trains_between" | "station_index" | "punctuality" | "availability" | "route_availability" | "fare" | "geocode";
 
 export type ProviderKind =
   /** Published by Indian Railways / Railway Board. */
@@ -115,6 +116,18 @@ export interface AvailabilityQuery {
 
 export interface AvailabilitySource extends Provider {
   availability(q: AvailabilityQuery): Promise<SeatAvailability>;
+}
+
+export interface RouteAvailabilityQuery {
+  from: string;
+  to: string;
+  /** YYYY-MM-DD boarding date. */
+  date: string;
+}
+
+/** Every train between two stations on a date with per-class availability, read in one request. */
+export interface RouteAvailabilitySource extends Provider {
+  routeAvailability(q: RouteAvailabilityQuery): Promise<RouteAvailability>;
 }
 
 export interface FareQuery {
