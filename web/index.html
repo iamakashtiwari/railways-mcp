@@ -154,13 +154,21 @@
 
         <div id="results-error" hidden></div>
         <p class="empty" id="results-empty" hidden></p>
+        <div class="no-seats" id="no-seats" role="status" hidden>
+          <div class="no-seats-text">
+            <strong id="no-seats-title">No confirmed seats on direct trains</strong>
+            <span>One change of train, or a nearby destination, may still have seats.</span>
+          </div>
+          <button class="no-seats-btn" id="no-seats-btn" type="button">Find other ways <span aria-hidden="true">→</span></button>
+        </div>
         <ol class="train-list" id="train-list" aria-label="Trains"></ol>
 
         <section class="card other-ways" id="other-ways" aria-labelledby="other-title">
           <div class="other-head">
             <h2 class="other-title" id="other-title">Other ways to go</h2>
             <p class="other-sub">
-              One change of train through up to 3 stations, plus any nearby destinations you add. Each route it reads uses one live check.
+              One change of train through the 5 best-connected stations on the way (including trains from your city's other terminals), plus
+              any nearby destinations you add. Each route it reads uses one live check.
             </p>
           </div>
 
@@ -186,10 +194,19 @@
             <p class="hint-left" id="nearby-help"></p>
           </div>
 
+          <div class="group">
+            <span class="group-label">Waiting time at the change</span>
+            <div class="toggles">
+              <button class="toggle" id="wait-normal" type="button" aria-pressed="true">2 to 10 hours</button>
+              <button class="toggle" id="wait-overnight" type="button" aria-pressed="false">Up to 15 hours (overnight)</button>
+            </div>
+          </div>
+
           <button class="cta is-secondary" id="other-btn" type="button">
             <span>Find other ways to go</span>
             <span class="cta-arrow" aria-hidden="true">→</span>
           </button>
+          <p class="hint" id="other-cost"></p>
 
           <div class="loading" id="other-loading" hidden>
             <p class="loading-text" aria-live="polite">

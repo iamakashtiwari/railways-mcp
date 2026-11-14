@@ -1320,6 +1320,68 @@ button {
   border-radius: var(--r-xl);
 }
 
+/* ---------- no seats prompt ---------- */
+
+.no-seats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  margin-top: 18px;
+  padding: 16px 18px;
+  border-radius: var(--r-xl);
+  border: 1px solid var(--rac-line);
+  background: linear-gradient(135deg, var(--rac-bg), var(--surface));
+  box-shadow: var(--shadow-1);
+  animation: rise 0.4s var(--ease) both;
+}
+
+.no-seats-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.no-seats-text strong {
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.no-seats-text span {
+  font-size: 0.86rem;
+  color: var(--text-2);
+}
+
+.no-seats-btn {
+  flex-shrink: 0;
+  padding: 10px 18px;
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 750;
+  color: #fff;
+  background: var(--grad);
+  border: 0;
+  border-radius: 99px;
+  cursor: pointer;
+  box-shadow: 0 10px 22px -10px var(--brand-glow);
+  transition: transform 0.2s var(--ease);
+}
+
+.no-seats-btn:hover {
+  transform: translateY(-1px);
+}
+
+@media (prefers-color-scheme: dark) {
+  .no-seats-btn {
+    color: #022c22;
+  }
+}
+
+.other-ways .hint {
+  margin-top: -10px;
+}
+
 /* ---------- train cards ---------- */
 
 .train-list {
