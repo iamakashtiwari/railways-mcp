@@ -7,6 +7,7 @@ import type {
   Geocoder,
   PunctualitySource,
   Provider,
+  RouteAvailabilitySource,
   ProviderInfo,
   ScheduleSource,
   StationSource,
@@ -21,6 +22,7 @@ type ByCapability = {
   station_index: LocalTimetableProvider;
   punctuality: PunctualitySource;
   availability: AvailabilitySource;
+  route_availability: RouteAvailabilitySource;
   fare: FareSource;
   geocode: Geocoder;
 };
@@ -33,7 +35,9 @@ export interface ChainOptions<T> {
 /** What to tell the caller when a capability has no configured provider. */
 const HOW_TO_ENABLE: Partial<Record<Capability, string>> = {
   punctuality: "Delay history needs an opt-in source (ENABLE_UNOFFICIAL_SOURCES=etrain, optionally ntes,railradar for cross-checks).",
-  availability: "Seat availability needs the opt-in unofficial source (ENABLE_UNOFFICIAL_SOURCES=confirmtkt).",
+  availability:
+    "Seat availability needs an opt-in unofficial source (ENABLE_UNOFFICIAL_SOURCES=railyatri with FIRECRAWL_API_KEY, or confirmtkt).",
+  route_availability: "Route-wide live availability needs the opt-in source ENABLE_UNOFFICIAL_SOURCES=railyatri with FIRECRAWL_API_KEY.",
   fare: "Fares need the opt-in unofficial source (ENABLE_UNOFFICIAL_SOURCES=confirmtkt).",
   geocode: "Geocoding is disabled (GEOCODER=off).",
 };

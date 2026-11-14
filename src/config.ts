@@ -8,6 +8,7 @@ import { ERailProvider } from "./providers/unofficial/erail.js";
 import { ETrainProvider } from "./providers/unofficial/etrain.js";
 import { NtesProvider } from "./providers/unofficial/ntes.js";
 import { RailRadarProvider } from "./providers/unofficial/railradar.js";
+import { RailYatriProvider } from "./providers/unofficial/railyatri.js";
 import { USER_AGENT } from "./lib/http.js";
 import { StationCodes } from "./core/station-codes.js";
 import { RailError, isRailError } from "./core/errors.js";
@@ -28,11 +29,13 @@ export interface Config {
   /** Operator-supplied client settings for unofficial sources (see .env.example). */
   confirmtkt: { clientId?: string; apiKey?: string };
   erailRouteKey?: string;
+  /** Firecrawl access for the railyatri source (FIRECRAWL_API_KEY, optional FIRECRAWL_API_URL / RAILYATRI_WAIT_MS). */
+  firecrawl: { apiKey?: string; apiUrl?: string; waitMs?: number };
   /** Whose answer is presented for stations, trains between and schedules (PRIMARY_SOURCE). Default "official". */
   primarySource: PrimarySource;
 }
 
-export const UNOFFICIAL_SOURCES = ["confirmtkt", "erail", "etrain", "ntes", "railradar"] as const;
+export const UNOFFICIAL_SOURCES = ["confirmtkt", "erail", "etrain", "ntes", "railradar", "railyatri"] as const;
 export const PRIMARY_SOURCES = ["official", "confirmtkt"] as const;
 export type PrimarySource = (typeof PRIMARY_SOURCES)[number];
 
@@ -49,6 +52,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   for (const u of unofficial) {
     if (u === "confirmtkt" && !(env.CONFIRMTKT_CLIENT_ID?.trim() && env.CONFIRMTKT_API_KEY?.trim())) {
       throw new Error("ENABLE_UNOFFICIAL_SOURCES includes confirmtkt, so CONFIRMTKT_CLIENT_ID and CONFIRMTKT_API_KEY must be set");
+    }
+    if (u === "railyatri" && !env.FIRECRAWL_API_KEY?.trim()) {
+      throw new Error("ENABLE_UNOFFICIAL_SOURCES includes railyatri, so FIRECRAWL_API_KEY must be set");
     }
     if (u === "erail" && !env.ERAIL_ROUTE_KEY?.trim()) {
       throw new Error("ENABLE_UNOFFICIAL_SOURCES includes erail, so ERAIL_ROUTE_KEY must be set");
@@ -67,6 +73,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (primarySource === "confirmtkt" && !unofficial.has("confirmtkt")) {
     throw new Error("PRIMARY_SOURCE=confirmtkt requires ENABLE_UNOFFICIAL_SOURCES to include confirmtkt");
   }
+  const waitMs = setting(env.RAILYATRI_WAIT_MS) === undefined ? undefined : Number(env.RAILYATRI_WAIT_MS);
+  if (waitMs !== undefined && (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > 30_000))
+    throw new Error("RAILYATRI_WAIT_MS must be a number between 0 and 30000");
   const geocoder = (env.GEOCODER ?? "nominatim").toLowerCase();
   if (geocoder !== "nominatim" && geocoder !== "off") throw new Error(`GEOCODER must be "nominatim" or "off"`);
   return {
@@ -80,6 +89,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     verifyBudgetMs,
     confirmtkt: { clientId: env.CONFIRMTKT_CLIENT_ID?.trim() || undefined, apiKey: env.CONFIRMTKT_API_KEY?.trim() || undefined },
     erailRouteKey: env.ERAIL_ROUTE_KEY?.trim() || undefined,
+    firecrawl: { apiKey: setting(env.FIRECRAWL_API_KEY), apiUrl: setting(env.FIRECRAWL_API_URL), waitMs },
     primarySource: primarySource as PrimarySource,
     allowedHosts: env.ALLOWED_HOSTS
       ? env.ALLOWED_HOSTS.split(",")
@@ -149,6 +159,9 @@ export function buildContext(cfg: Config, overrides: { timetables?: LocalTimetab
   const ctFirst = cfg.primarySource === "confirmtkt" && ct !== null;
   const er = cfg.unofficial.has("erail") ? new ERailProvider({ routeKey: cfg.erailRouteKey! }) : null;
   const railradar = cfg.unofficial.has("railradar") ? new RailRadarProvider() : null;
+  const railyatri = cfg.unofficial.has("railyatri")
+    ? new RailYatriProvider({ apiKey: cfg.firecrawl.apiKey!, apiUrl: cfg.firecrawl.apiUrl, waitMs: cfg.firecrawl.waitMs })
+    : null;
   const history = [
     cfg.unofficial.has("etrain") ? new ETrainProvider() : null, // per-run, dated history: primary
     cfg.unofficial.has("ntes") ? new NtesProvider() : null, // official 7-day averages: cross-check
@@ -186,7 +199,10 @@ export function buildContext(cfg: Config, overrides: { timetables?: LocalTimetab
 
   for (const h of history) if (h) r.register("punctuality", h);
 
+  // Live page read first; ConfirmTkt's cached snapshot is the fallback.
+  if (railyatri) r.register("availability", railyatri);
   if (ct) r.register("availability", ct);
+  if (railyatri) r.register("route_availability", railyatri);
 
   if (ct) r.register("fare", ct);
 

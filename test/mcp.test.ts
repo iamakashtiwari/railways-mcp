@@ -35,9 +35,11 @@ describe("MCP server (in-memory)", () => {
       "get_data_sources",
       "get_fare",
       "get_punctuality",
+      "get_route_availability",
       "get_seat_availability",
       "get_station_trains",
       "get_train_schedule",
+      "plan_journey",
       "search_stations",
       "search_trains",
     ]);
@@ -98,7 +100,7 @@ describe("MCP server (in-memory)", () => {
   it("describes data sources including disabled ones", async () => {
     const r = parse(await client.callTool({ name: "get_data_sources", arguments: {} }));
     expect(r.providers.map((p: any) => p.id)).toContain("test-official");
-    expect(r.disabled.map((d: any) => d.source)).toEqual(expect.arrayContaining(["confirmtkt", "erail", "nominatim"]));
+    expect(r.disabled.map((d: any) => d.source)).toEqual(expect.arrayContaining(["confirmtkt", "erail", "railyatri", "nominatim"]));
   });
 
   it("validates input types", async () => {
@@ -122,7 +124,7 @@ describe("MCP server over streamable HTTP", () => {
   it("serves initialize, tools/list and tools/call statelessly", async () => {
     const client = new Client({ name: "http-test", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(url));
-    expect((await client.listTools()).tools.length).toBe(11);
+    expect((await client.listTools()).tools.length).toBe(13);
     const r = parse(await client.callTool({ name: "search_stations", arguments: { query: "delta" } }));
     expect(r.stations[0].code).toBe("DDD");
     await client.close();

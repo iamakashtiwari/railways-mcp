@@ -9,3 +9,7 @@ They contain no copied third-party content. Every value (times, delays,
 durations, distances, availability statuses, fares, cache timestamps,
 coordinates, CSRF token names/values, internal ids) is invented. Train numbers
 and station codes are public identifiers, kept so the tests read naturally.
+
+`railyatri/` holds hand-written Markdown in the shape Firecrawl returns for
+RailYatri's trains-between-stations page (labels, line order, link format).
+Train numbers, names, timings, fares and statuses in it are invented.

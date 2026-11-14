@@ -5,6 +5,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Added
+- **Live availability source `railyatri` (opt-in):** reads RailYatri's public trains-between-stations page through Firecrawl with the operator's own `FIRECRAWL_API_KEY` (self-hosted Firecrawl via `FIRECRAWL_API_URL`). One read covers every train and class on a route for a date. Requests ask for an Indian location and the parser rejects a page that shows a different date than requested, because the page converts dates with the browser's time zone. Registered ahead of ConfirmTkt for `get_seat_availability`.
+- **`get_route_availability`:** live general-quota availability, seat/RAC/waitlist numbers, fares and confirmation-chance labels for every train on a route and date in one call.
+- **`plan_journey`:** ranks direct trains, alternative destinations and one-change journeys (from the official timetable, each leg checked live on its own boarding date) by live availability; reports `lookups_used`.
 - **`get_punctuality` splits reused train numbers by route (#32):** seasonal specials reuse their numbers on different routes, so a long window mixed runs of different trains. A route counts only when at least 2 runs share the same end stations. Two routes count as different only when each has a station recorded in all its runs that the other never recorded, no run outside the routes recorded both, and their seasons don't overlap. When that holds, `route_variants` gives each route's dates, run count and per-station statistics, and a note says the combined figures mix them. Anything less clear-cut, which could be missing data, is not split.
 
 ### Fixed

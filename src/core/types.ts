@@ -115,6 +115,48 @@ export interface AvailabilityDay {
   status: string;
   category: "available" | "rac" | "waitlist" | "not_available" | "unknown";
   confirm_probability_percent: number | null;
+  /** Qualitative confirmation chance when the source gives a label instead of a percentage. */
+  confirm_chance?: "low" | "medium" | "high" | null;
+}
+
+/** One class of one train in a route-wide availability listing. */
+export interface RouteClassAvailability {
+  class_code: string;
+  /** Status text as the source shows it, e.g. "12 Available", "40 Waitlist", "Regret". */
+  status: string;
+  category: AvailabilityDay["category"];
+  /** Seats free (available), RAC position or waitlist position, when the status states one. */
+  count: number | null;
+  fare_inr: number | null;
+  confirm_chance: "low" | "medium" | "high" | null;
+}
+
+/** One train in a route-wide availability listing for a date. */
+export interface RouteTrainAvailability {
+  train_number: string;
+  train_name: string;
+  /** Boarding station the source matched (can be a nearby terminal, e.g. ANVT for NDLS). */
+  from_code: string;
+  to_code: string;
+  departure_time: string | null;
+  arrival_time: string | null;
+  duration_minutes: number | null;
+  /** false when the source lists the train as running on another day (see next_run). */
+  runs_on_date: boolean;
+  /** Source's "next run" text for trains that don't run on the date, e.g. "Tue, Nov 17". */
+  next_run: string | null;
+  classes: RouteClassAvailability[];
+}
+
+/** Every train the source lists between two stations on a date, with per-class availability (general quota). */
+export interface RouteAvailability {
+  from_code: string;
+  to_code: string;
+  date: string;
+  quota: string;
+  trains: RouteTrainAvailability[];
+  /** When the source was read; the listing is a live page read, not a cached snapshot. */
+  observed_at: string;
 }
 
 export interface SeatAvailability {
