@@ -5,6 +5,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 ## [Unreleased]
 
 ### Added
+- **Private web app (`npm run app`, "Rail Seat Finder"):** search page, live results for every train and class, 7-day date strip, and alternatives (one change of train plus user-picked nearby stations) at `http://127.0.0.1:4321`. Loopback-only, Host and same-origin checks, strict CSP, allow-listed read-only tools, per-minute limit and a daily cap on live page reads (`APP_DAILY_PAGE_READS`). Plain HTML/CSS/JS in `web/`, no build step.
 - **Live availability source `railyatri` (opt-in):** reads RailYatri's public trains-between-stations page through Firecrawl with the operator's own `FIRECRAWL_API_KEY` (self-hosted Firecrawl via `FIRECRAWL_API_URL`). One read covers every train and class on a route for a date. Requests ask for an Indian location and the parser rejects a page that shows a different date than requested, because the page converts dates with the browser's time zone. Registered ahead of ConfirmTkt for `get_seat_availability`.
 - **`get_route_availability`:** live general-quota availability, seat/RAC/waitlist numbers, fares and confirmation-chance labels for every train on a route and date in one call.
 - **`plan_journey`:** ranks direct trains, alternative destinations and one-change journeys (from the official timetable, each leg checked live on its own boarding date) by live availability; reports `lookups_used`.
