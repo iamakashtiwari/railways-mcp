@@ -62,7 +62,33 @@ export interface RailYatriOptions {
    * cancels the read and fails the call with that error, e.g. when a daily read budget is used up.
    */
   beforeRead?: () => void;
+  /** Called when Firecrawl refused a read that beforeRead had counted (HTTP 429 or 402: nothing was billed). */
+  onReadRefused?: () => void;
+  /** Firecrawl page reads running at the same time; more wait their turn (default 2, the smallest plan's limit). */
+  maxConcurrent?: number;
+  /** Longest Retry-After (seconds) to wait once after a 429 before giving up (default 30). */
+  maxRetryAfterSeconds?: number;
 }
+
+/** A counting semaphore: at most `size` holders at once, the rest wait in order. */
+class Slots {
+  private busy = 0;
+  private readonly queue: Array<() => void> = [];
+  constructor(private readonly size: number) {}
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.busy >= this.size) await new Promise<void>((r) => this.queue.push(r));
+    else this.busy++;
+    try {
+      return await fn();
+    } finally {
+      const next = this.queue.shift();
+      if (next) next();
+      else this.busy--;
+    }
+  }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** DD-MM-YYYY, the page's journey_date format. */
 function pageDate(iso: string): string {
@@ -254,8 +280,10 @@ export class RailYatriProvider implements RouteAvailabilitySource, AvailabilityS
   private readonly limiter: RateLimiter;
   private readonly cache: TtlCache<RouteAvailability>;
   private readonly now: () => Date;
+  private readonly slots: Slots;
 
   constructor(private readonly opts: RailYatriOptions) {
+    this.slots = new Slots(Math.max(1, opts.maxConcurrent ?? 2));
     this.apiUrl = (opts.apiUrl ?? DEFAULT_API_URL).replace(/\/+$/, "");
     this.waitMs = opts.waitMs ?? 10_000;
     this.limiter = new RateLimiter(opts.minIntervalMs ?? 250);
@@ -298,8 +326,33 @@ export class RailYatriProvider implements RouteAvailabilitySource, AvailabilityS
     };
   }
 
-  private async fetchRoute(from: string, to: string, date: string): Promise<RouteAvailability> {
-    this.opts.beforeRead?.();
+  private fetchRoute(from: string, to: string, date: string): Promise<RouteAvailability> {
+    return this.slots.run(async () => {
+      this.opts.beforeRead?.();
+      try {
+        return await this.scrapeOnce(from, to, date);
+      } catch (e) {
+        if (!(e instanceof RailError) || e.code !== "RATE_LIMITED" || /quota exceeded|credits/i.test(e.message)) throw this.refused(e);
+        // Firecrawl refused for rate (not quota): wait as long as it asks, once. Refused requests are not billed.
+        const wait = e.retryAfterSeconds ?? 10;
+        if (wait > (this.opts.maxRetryAfterSeconds ?? 30)) throw this.refused(e);
+        await sleep(wait * 1000);
+        try {
+          return await this.scrapeOnce(from, to, date);
+        } catch (e2) {
+          throw this.refused(e2);
+        }
+      }
+    });
+  }
+
+  /** Gives the counted read back when Firecrawl refused it (429 / 402), then returns the error. */
+  private refused(e: unknown): unknown {
+    if (e instanceof RailError && e.code === "RATE_LIMITED" && e.provider === PROVIDER) this.opts.onReadRefused?.();
+    return e;
+  }
+
+  private async scrapeOnce(from: string, to: string, date: string): Promise<RouteAvailability> {
     const body = JSON.stringify({
       url: pageUrl(from, to, date),
       formats: ["markdown"],
@@ -314,6 +367,7 @@ export class RailYatriProvider implements RouteAvailabilitySource, AvailabilityS
       headers: { authorization: `Bearer ${this.opts.apiKey}`, "content-type": "application/json" },
       timeoutMs: this.opts.timeoutMs ?? this.waitMs + 45_000,
       retries: this.opts.retries ?? 1,
+      retryOn429: false,
       limiter: this.limiter,
     });
     if (res.status === 402) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_DETOUR, detourRatio, haversineKm, rankHubs, type HubCandidate } from "../../src/core/hubs.js";
+import { MAX_DETOUR, MIN_KM_FROM_ENDS, detourRatio, haversineKm, rankHubs, type HubCandidate } from "../../src/core/hubs.js";
 import { CITY_TERMINALS, cityTerminals } from "../../src/core/terminals.js";
 
 const hub = (code: string, first: number, onward: number, detour: number | null, fastest = 600): HubCandidate => ({
@@ -20,6 +20,14 @@ describe("rankHubs", () => {
   it("drops stations well off the way, keeps ones with unknown positions", () => {
     const ranked = rankHubs([hub("DETOUR", 50, 50, MAX_DETOUR + 0.2), hub("ONWAY", 3, 3, 1.05), hub("UNKNOWN", 3, 3, null)]);
     expect(ranked.map((h) => h.code)).toEqual(["ONWAY", "UNKNOWN"]);
+  });
+
+  it("skips stations so close to either end that changing there is not another way to go", () => {
+    const suburb = { ...hub("SUBURB", 40, 40, 1.0), km_from_ends: 20 };
+    const real = { ...hub("JUNCTION", 5, 5, 1.05), km_from_ends: 300 };
+    const unknown = { ...hub("NOPOS", 3, 3, 1.05), km_from_ends: null };
+    expect(rankHubs([suburb, real, unknown]).map((h) => h.code)).toEqual(["JUNCTION", "NOPOS"]);
+    expect(MIN_KM_FROM_ENDS).toBeGreaterThan(20);
   });
 
   it("falls back to fastest first when every station is off the way", () => {

@@ -43,7 +43,7 @@ Design documentation, with C4, UML sequence/class/deployment and flowchart diagr
 | `find_connections` | Journeys of 2–3 trains with layover bounds, `via`, max total time and running-day compatibility (`works_on`). Pointless changes are removed |
 | `get_punctuality` | Delay history per station over 1w/1m/3m/6m/1y: runs counted, period, average/median/max delay, share within 15 min, over 30 min and over 60 min. Cross-checked between sources within ±10 min |
 | `get_route_availability` | **Live** availability for every train and class on a route and date in one call: status, seat/RAC/waitlist number, fare, confirmation-chance label (needs `railyatri`) |
-| `plan_journey` | Ranks direct trains, alternative destinations and one-change journeys by **live** availability: confirmed direct → confirmed connection → confirmed alternative destination → RAC → waitlist (smallest first). Each connection leg is checked live on its own boarding date. Change stations: fastest journeys first, or `hub_selection: "well_connected"` (on-the-way stations with the most trains on both legs); `include_city_terminals` also plans from and to a city's other main terminals (needs `railyatri`) |
+| `plan_journey` | Ranks direct trains, alternative destinations and one-change journeys by **live** availability: confirmed direct → confirmed connection → confirmed alternative destination → RAC → waitlist (smallest first). Each connection leg is checked live on its own boarding date. Change stations: fastest journeys first, or `hub_selection: "well_connected"` (on-the-way stations with the most trains on both legs); `include_city_terminals` also plans from and to a city's other main terminals; `omit_direct` returns only the alternatives (needs `railyatri`) |
 | `get_seat_availability` | Availability per class and quota (needs an availability source) |
 | `get_fare` | Fares per class and quota (needs a fare source) |
 | `get_data_sources` | Active sources, freshness, disabled capabilities, today's date in IST |
@@ -86,10 +86,12 @@ When an answer comes from a lower-priority source, `source.notes` says why.
 ENABLE_UNOFFICIAL_SOURCES=railyatri
 FIRECRAWL_API_KEY=fc-...           # your own key; each route read is one Firecrawl page scrape
 # FIRECRAWL_API_URL=http://localhost:3002   # optional: self-hosted Firecrawl
-# RAILYATRI_WAIT_MS=10000                   # optional: wait for availability to render (busy routes may need more)
+# RAILYATRI_WAIT_MS=10000                   # optional: wait for availability to render; 5000 returned the same data ~4 s faster in testing (busy routes may need more)
+# FIRECRAWL_CONCURRENCY=2                   # optional: page reads at the same time (raise on a bigger Firecrawl plan)
 ```
 
 How it works and what it guards against:
+- Page reads run at most `FIRECRAWL_CONCURRENCY` (default 2) at a time; more wait their turn. When Firecrawl answers 429 for rate, the read waits for its `Retry-After` (up to 30 s) and tries once more; refused reads are not billed by Firecrawl and are not counted against the app's daily cap. If routes are still refused, `plan_journey` returns what it read and says how many routes were not read (`incomplete`, `routes_not_read`).
 - One page read returns every train and class on a route for a date, so `get_route_availability` costs one scrape, and `plan_journey` costs one per route it checks (`lookups_used` reports it). Reads are cached for 90 s.
 - The page converts the date using the browser's time zone, so outside India it silently shows the *previous* day. Requests ask Firecrawl for an Indian location, and the parser **checks the date the page shows and discards a mismatch** rather than returning another day's seats.
 - Trains from nearby terminals (e.g. ANVT and DLI for NDLS) are included with their own boarding codes. Trains that run on other weekdays are flagged `runs_on_date: false` and left out of planning.

@@ -370,6 +370,19 @@ describe("daily live-check cap", () => {
     expect(after.json.live_checks).toEqual({ used: 1, limit: 2 });
   });
 
+  it("gives back a read the source refused, never going below zero", () => {
+    const cap = new DailyReadCap(2);
+    cap.beforeRead();
+    cap.beforeRead();
+    cap.refund();
+    expect(cap.used()).toBe(1);
+    cap.beforeRead();
+    expect(() => cap.beforeRead()).toThrow(RailError);
+    const empty = new DailyReadCap(2);
+    empty.refund();
+    expect(empty.used()).toBe(0);
+  });
+
   it("the hook itself refuses a read beyond the cap", () => {
     const cap = new DailyReadCap(1);
     cap.beforeRead();

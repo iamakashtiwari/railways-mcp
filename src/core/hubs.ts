@@ -19,7 +19,12 @@ export interface HubCandidate {
   detour: number | null;
   /** Fastest timetable journey through the hub, in minutes. */
   fastest_minutes: number;
+  /** Straight-line km from the hub to the nearer end of the journey; null when a position is unknown. */
+  km_from_ends?: number | null;
 }
+
+/** A change this close to the origin or destination (e.g. a suburb) is not a different way to go. */
+export const MIN_KM_FROM_ENDS = 60;
 
 /** Hubs further out of the way than this are not considered (when positions are known). */
 export const MAX_DETOUR = 1.35;
@@ -57,7 +62,9 @@ export function hubScore(h: HubCandidate): number {
  * If every hub is beyond the detour limit, they are ordered by fastest journey instead.
  */
 export function rankHubs(candidates: HubCandidate[]): HubCandidate[] {
-  const onTheWay = candidates.filter((h) => h.detour === null || h.detour <= MAX_DETOUR);
+  const onTheWay = candidates.filter(
+    (h) => (h.detour === null || h.detour <= MAX_DETOUR) && (h.km_from_ends == null || h.km_from_ends >= MIN_KM_FROM_ENDS),
+  );
   if (!onTheWay.length) return [...candidates].sort((a, b) => a.fastest_minutes - b.fastest_minutes || a.code.localeCompare(b.code));
   return onTheWay
     .map((h) => ({ h, s: hubScore(h) }))

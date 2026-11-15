@@ -89,9 +89,12 @@ class FakeLive implements RouteAvailabilitySource {
     possiblyOutdated: false,
   };
   calls: string[] = [];
+  /** Routes ("FROM|TO") the source refuses, as Firecrawl does when rate-limited. */
+  refuse = new Set<string>();
   constructor(private readonly tt: LocalTimetableProvider) {}
   async routeAvailability(q: RouteAvailabilityQuery): Promise<RouteAvailability> {
     this.calls.push(`${q.from}|${q.to}|${q.date}`);
+    if (this.refuse.has(`${q.from}|${q.to}`)) throw new RailError("RATE_LIMITED", "railyatri rate limit exceeded (HTTP 429)", "fake-live");
     const froms = q.from === "NDLS" ? ["NDLS", "ANVT"] : [q.from];
     const trains: RouteTrainAvailability[] = [];
     for (const f of froms) {
@@ -167,5 +170,119 @@ describe("plan_journey change stations", () => {
     const hubs = r.considered.change_stations.map((h: any) => h.code);
     expect(hubs).not.toContain("NDLS");
     expect(hubs).not.toContain("ANVT");
+  });
+});
+
+describe("plan_journey when the source starts refusing", () => {
+  it("keeps the options from routes that were read and says how many were not", async () => {
+    fake.refuse = new Set(["HUBF|DST"]);
+    try {
+      const r = await plan({ hub_selection: "well_connected", include_city_terminals: true, max_change_stations: 5 });
+      expect(r.incomplete).toBe(true);
+      expect(r.routes_not_read).toBeGreaterThanOrEqual(1);
+      expect(r.notes[0]).toMatch(/^\d+ routes? (was|were) not read because the seat source refused/);
+      const conns = r.options.filter((o: any) => o.kind === "connection");
+      expect(conns.length).toBeGreaterThan(0);
+      expect(conns.every((o: any) => o.transfer.station_code === "HUBA")).toBe(true);
+    } finally {
+      fake.refuse = new Set();
+    }
+  });
+
+  it("fails with RATE_LIMITED when even the direct route is refused", async () => {
+    fake.refuse = new Set(["NDLS|DST"]);
+    try {
+      const res: any = await client.callTool({
+        name: "plan_journey",
+        arguments: { from: "NDLS", to: "DST", date: D, connections: "always" },
+      });
+      expect(res.isError).toBe(true);
+      expect(parse(res).error.code).toBe("RATE_LIMITED");
+    } finally {
+      fake.refuse = new Set();
+    }
+  });
+});
+
+describe("plan_journey output", () => {
+  /** One train from the hub calls at two terminals of the destination city (PPTA, then PNBE). */
+  const patna: TimetableFile = {
+    ...network,
+    stations: [
+      ["NDLS", "Capital Main", "State", "NR", 28.6, 77.2],
+      ["ANVT", "Capital East", "State", "NR", 28.65, 77.3],
+      ["HUBA", "Busy Junction", "State", "NR", 27.2, 80.3],
+      ["PPTA", "City West", "State", "EC", 25.62, 85.04],
+      ["PNBE", "City Main", "State", "EC", 25.6, 85.14],
+    ],
+    trains: [
+      train(
+        "93001",
+        [
+          ["NDLS", "Capital Main", null, "06:00", 1, 0],
+          ["HUBA", "Busy Junction", "12:00", null, 1, 320],
+        ],
+        [...ALL],
+      ),
+      train(
+        "94001",
+        [
+          ["HUBA", "Busy Junction", null, "16:00", 1, 0],
+          ["PPTA", "City West", "21:00", "21:05", 1, 400],
+          ["PNBE", "City Main", "21:30", null, 1, 410],
+        ],
+        [...ALL],
+      ),
+      train(
+        "95001",
+        [
+          ["NDLS", "Capital Main", null, "20:00", 1, 0],
+          ["PNBE", "City Main", "10:00", null, 2, 1000],
+        ],
+        [...ALL],
+      ),
+    ],
+  };
+
+  let c2: Client;
+  beforeAll(async () => {
+    const tt = new LocalTimetableProvider(patna);
+    const ctx = buildContext(loadConfig({ GEOCODER: "off" }), { timetables: [tt] });
+    ctx.registry.register("route_availability", new FakeLive(tt));
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    c2 = new Client({ name: "test", version: "1" });
+    await Promise.all([createMcpServer(ctx).connect(serverT), c2.connect(clientT)]);
+  });
+
+  const run = async (extra: Record<string, unknown>) =>
+    parse(
+      await c2.callTool({
+        name: "plan_journey",
+        arguments: {
+          from: "NDLS",
+          to: "PNBE",
+          date: D,
+          classes: ["SL"],
+          connections: "always",
+          hub_selection: "well_connected",
+          include_city_terminals: true,
+          ...extra,
+        },
+      }),
+    );
+
+  it("lists a connection only once when it reaches two terminals of the destination city", async () => {
+    const r = await run({});
+    const conns = r.options.filter((o: any) => o.kind === "connection");
+    const keys = conns.map((o: any) => o.legs.map((l: any) => `${l.train_number}|${l.class_code}`).join(">"));
+    expect(keys).toEqual(["93001|SL>94001|SL"]);
+  });
+
+  it("omit_direct leaves direct trains out of options but still reads them", async () => {
+    const withDirect = await run({});
+    expect(withDirect.options.some((o: any) => o.kind === "direct")).toBe(true);
+    const r = await run({ omit_direct: true, limit: 1 });
+    expect(r.options.map((o: any) => o.kind)).toEqual(["connection"]);
+    expect(r.considered.direct_and_alternative_options).toBeGreaterThan(0);
   });
 });

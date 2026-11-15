@@ -173,3 +173,96 @@ describe("RailYatriProvider", () => {
     ).toBe("NOT_FOUND");
   });
 });
+
+describe("Firecrawl pacing and refusals", () => {
+  const md = fixture("route-ndls-cpr.md"); // shows 18 Nov
+  const okBody = () => firecrawlOk(md);
+  const make = (extra: Partial<ConstructorParameters<typeof RailYatriProvider>[0]> = {}) =>
+    new RailYatriProvider({
+      apiKey: "test-key",
+      minIntervalMs: 0,
+      retries: 0,
+      now: NOW,
+      cache: new TtlCache<RouteAvailability>(),
+      maxRetryAfterSeconds: 2,
+      ...extra,
+    });
+
+  it("runs at most maxConcurrent page reads at once", async () => {
+    let running = 0;
+    let peak = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        running++;
+        peak = Math.max(peak, running);
+        await new Promise((r) => setTimeout(r, 30));
+        running--;
+        return new Response(okBody(), { status: 200 });
+      }),
+    );
+    const p = make({ maxConcurrent: 2 });
+    const routes = ["CPR", "DDD", "EEE", "FFF", "GGG"].map((to) =>
+      p.routeAvailability({ from: "NDLS", to, date: "2026-11-18" }).catch(() => null),
+    );
+    await Promise.all(routes);
+    expect(peak).toBe(2);
+  });
+
+  it("after a rate-limit 429 waits for Retry-After, tries once more, and keeps the read counted once", async () => {
+    let n = 0;
+    const fn = vi.fn(async () => {
+      n++;
+      return n === 1
+        ? new Response(JSON.stringify({ error: "Rate limit exceeded" }), { status: 429, headers: { "retry-after": "1" } })
+        : new Response(okBody(), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fn);
+    const before = vi.fn();
+    const refused = vi.fn();
+    const t0 = Date.now();
+    const r = await make({ beforeRead: before, onReadRefused: refused }).routeAvailability({ from: "NDLS", to: "CPR", date: "2026-11-18" });
+    expect(r.trains.length).toBeGreaterThan(0);
+    expect(fn).toHaveBeenCalledTimes(2);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(950);
+    expect(before).toHaveBeenCalledTimes(1);
+    expect(refused).not.toHaveBeenCalled();
+  });
+
+  it("gives the counted read back when Firecrawl still refuses, or refuses for credits or quota", async () => {
+    for (const [status, body, headers, calls] of [
+      [429, { error: "Rate limit exceeded" }, { "retry-after": "1" }, 2],
+      [429, { error: "Rate limit exceeded" }, { "retry-after": "120" }, 1], // longer than we wait
+      [429, { error: "Monthly quota exceeded" }, {}, 1],
+      [402, { error: "Insufficient credits" }, {}, 1],
+    ] as const) {
+      const fn = vi.fn(async () => new Response(JSON.stringify(body), { status, headers }));
+      vi.stubGlobal("fetch", fn);
+      const refused = vi.fn();
+      const e = await railError(make({ onReadRefused: refused }).routeAvailability({ from: "NDLS", to: "CPR", date: "2026-11-18" }));
+      expect(e.code).toBe("RATE_LIMITED");
+      expect(fn).toHaveBeenCalledTimes(calls);
+      expect(refused).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("does not refund other failures or the daily cap's own refusal", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("oops", { status: 500 })),
+    );
+    const refused = vi.fn();
+    expect(
+      (await railError(make({ onReadRefused: refused }).routeAvailability({ from: "NDLS", to: "CPR", date: "2026-11-18" }))).code,
+    ).toBe("UPSTREAM_UNAVAILABLE");
+    const capErr = new RailError("RATE_LIMITED", "daily cap", "app");
+    const p = make({
+      onReadRefused: refused,
+      beforeRead: () => {
+        throw capErr;
+      },
+    });
+    expect(await railError(p.routeAvailability({ from: "NDLS", to: "CPR", date: "2026-11-18" }))).toBe(capErr);
+    expect(refused).not.toHaveBeenCalled();
+  });
+});

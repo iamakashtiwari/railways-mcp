@@ -30,7 +30,7 @@ export interface Config {
   confirmtkt: { clientId?: string; apiKey?: string };
   erailRouteKey?: string;
   /** Firecrawl access for the railyatri source (FIRECRAWL_API_KEY, optional FIRECRAWL_API_URL / RAILYATRI_WAIT_MS). */
-  firecrawl: { apiKey?: string; apiUrl?: string; waitMs?: number };
+  firecrawl: { apiKey?: string; apiUrl?: string; waitMs?: number; concurrency?: number };
   /** Whose answer is presented for stations, trains between and schedules (PRIMARY_SOURCE). Default "official". */
   primarySource: PrimarySource;
 }
@@ -76,6 +76,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const waitMs = setting(env.RAILYATRI_WAIT_MS) === undefined ? undefined : Number(env.RAILYATRI_WAIT_MS);
   if (waitMs !== undefined && (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > 30_000))
     throw new Error("RAILYATRI_WAIT_MS must be a number between 0 and 30000");
+  const concurrency = setting(env.FIRECRAWL_CONCURRENCY) === undefined ? undefined : Number(env.FIRECRAWL_CONCURRENCY);
+  if (concurrency !== undefined && (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 50))
+    throw new Error("FIRECRAWL_CONCURRENCY must be a whole number between 1 and 50");
   const geocoder = (env.GEOCODER ?? "nominatim").toLowerCase();
   if (geocoder !== "nominatim" && geocoder !== "off") throw new Error(`GEOCODER must be "nominatim" or "off"`);
   return {
@@ -89,7 +92,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     verifyBudgetMs,
     confirmtkt: { clientId: env.CONFIRMTKT_CLIENT_ID?.trim() || undefined, apiKey: env.CONFIRMTKT_API_KEY?.trim() || undefined },
     erailRouteKey: env.ERAIL_ROUTE_KEY?.trim() || undefined,
-    firecrawl: { apiKey: setting(env.FIRECRAWL_API_KEY), apiUrl: setting(env.FIRECRAWL_API_URL), waitMs },
+    firecrawl: { apiKey: setting(env.FIRECRAWL_API_KEY), apiUrl: setting(env.FIRECRAWL_API_URL), waitMs, concurrency },
     primarySource: primarySource as PrimarySource,
     allowedHosts: env.ALLOWED_HOSTS
       ? env.ALLOWED_HOSTS.split(",")
@@ -141,6 +144,8 @@ export interface ContextOptions {
   codes?: StationCodes;
   /** Called before each real railyatri page read (not on cache hits); throwing a RailError cancels the read. */
   railyatriBeforeRead?: () => void;
+  /** Called when Firecrawl refused a read that railyatriBeforeRead counted (nothing was billed). */
+  railyatriOnReadRefused?: () => void;
 }
 
 export function buildContext(cfg: Config, overrides: ContextOptions = {}): AppContext {
@@ -172,6 +177,8 @@ export function buildContext(cfg: Config, overrides: ContextOptions = {}): AppCo
         apiUrl: cfg.firecrawl.apiUrl,
         waitMs: cfg.firecrawl.waitMs,
         beforeRead: overrides.railyatriBeforeRead,
+        onReadRefused: overrides.railyatriOnReadRefused,
+        maxConcurrent: cfg.firecrawl.concurrency,
       })
     : null;
   const history = [
