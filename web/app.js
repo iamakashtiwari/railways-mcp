@@ -1124,8 +1124,9 @@ async function findOtherWays() {
     max_change_stations: HUBS_CHECKED,
     hub_selection: "well_connected",
     include_city_terminals: true,
-    // direct trains are already listed above, so ask for room to show 12 others
-    limit: 30,
+    // direct trains are already listed above
+    omit_direct: true,
+    limit: 12,
   };
   if (load(KEYS.overnight, false) === true) args.max_layover_minutes = OVERNIGHT_MAX_WAIT;
   if (alts.length) args.alternative_destinations = alts;
@@ -1134,7 +1135,7 @@ async function findOtherWays() {
     const data = await callTool("plan_journey", args, other.controller.signal);
     if (mine !== other.seq) return;
     finishOther();
-    const options = (data && Array.isArray(data.options) ? data.options : []).filter((o) => o && o.kind !== "direct").slice(0, 12);
+    const options = (data && Array.isArray(data.options) ? data.options : []).filter((o) => o && o.kind !== "direct");
     const via = (data && data.considered && Array.isArray(data.considered.change_stations) ? data.considered.change_stations : [])
       .map((h) => h && h.code)
       .filter(isCode);
@@ -1161,7 +1162,9 @@ async function findOtherWays() {
 
     const used = usedBefore !== null && liveUsed !== null ? liveUsed - usedBefore : null;
     const problems = (Array.isArray(data.notes) ? data.notes : []).filter(
-      (n) => typeof n === "string" && /^(Could not read|No timetable|The timetable has no|\d+ of \d+ timetable connections)/.test(n),
+      (n) =>
+        typeof n === "string" &&
+        /^(Could not read|No timetable|The timetable has no|\d+ of \d+ timetable connections|\d+ routes? (was|were) not read)/.test(n),
     );
     function renderSummary() {
       const parts = [

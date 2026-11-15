@@ -201,6 +201,14 @@ export class DailyReadCap {
     this.count++;
     this.store?.save({ day: this.day, count: this.count });
   };
+
+  /** The railyatri onReadRefused hook: gives back a read the source refused (nothing was billed). */
+  readonly refund = (): void => {
+    this.sync();
+    if (this.count === 0) return;
+    this.count--;
+    this.store?.save({ day: this.day, count: this.count });
+  };
 }
 
 /** Sliding one-minute window over API calls. */
@@ -389,7 +397,7 @@ export function createLocalApp(ctx: AppContext, options: LocalAppOptions): Expre
     let result: Awaited<ReturnType<Client["callTool"]>>;
     if (live) liveInFlight++;
     try {
-      result = await (await client()).callTool({ name, arguments: args as Record<string, unknown> }, undefined, { timeout: 180_000 });
+      result = await (await client()).callTool({ name, arguments: args as Record<string, unknown> }, undefined, { timeout: 360_000 });
     } catch (e) {
       console.error(`tool ${name} failed:`, e instanceof Error ? e.message : String(e));
       sendError(res, { code: "INTERNAL", message: "The tool call failed inside the app." });
@@ -482,7 +490,7 @@ async function main(): Promise<void> {
   const cfg = loadConfig();
   const store = new FileCapStore(process.env.APP_STATE_FILE?.trim() || defaultStateFile());
   const cap = new DailyReadCap(limit, undefined, store);
-  const ctx = buildContext(cfg, { railyatriBeforeRead: cap.beforeRead });
+  const ctx = buildContext(cfg, { railyatriBeforeRead: cap.beforeRead, railyatriOnReadRefused: cap.refund });
   if (!cfg.unofficial.has("railyatri")) {
     console.warn("railyatri is not enabled (ENABLE_UNOFFICIAL_SOURCES), so live seat checks will be unavailable.");
   }

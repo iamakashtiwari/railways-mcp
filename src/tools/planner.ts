@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { findConnections, type Journey } from "../core/connections.js";
-import { detourRatio, rankHubs, type HubCandidate } from "../core/hubs.js";
+import { detourRatio, haversineKm, rankHubs, type HubCandidate } from "../core/hubs.js";
 import { cityTerminals } from "../core/terminals.js";
 import { RailError, isRailError } from "../core/errors.js";
 import { DEFAULT_CLASS_ORDER, bestClass, directOptions, makeOption, rankOptions, toLeg, type TravelOption } from "../core/planner.js";
@@ -90,6 +90,12 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
           .describe(
             "fastest: change stations of the fastest timetable journeys; well_connected: on-the-way stations with the most trains on both legs",
           ),
+        omit_direct: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Leave direct trains on the requested route out of options (they are still read); limit then applies to the other options",
+          ),
         include_city_terminals: z
           .boolean()
           .default(false)
@@ -110,19 +116,35 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
       const classes = a.classes ?? DEFAULT_CLASS_ORDER.slice(0, 8);
       const notes: string[] = [];
       const reads = new Set<string>();
-      const read = async (f: string, t: string, d: string): Promise<RouteAvailability | null> => {
-        reads.add(`${f}|${t}|${d}`);
+      /** Set once the source refuses for rate or quota after the direct route was read; later routes are skipped. */
+      let refused: RailError | null = null;
+      const skipped = new Set<string>();
+      const read = async (f: string, t: string, d: string, essential = false): Promise<RouteAvailability | null> => {
+        const key = `${f}|${t}|${d}`;
+        if (refused && !essential) {
+          skipped.add(key);
+          return null;
+        }
+        reads.add(key);
         try {
           return (await route(f, t, d)).data;
         } catch (e) {
-          if (isRailError(e) && (e.code === "UNSUPPORTED" || e.code === "UPSTREAM_AUTH" || e.code === "RATE_LIMITED")) throw e;
+          if (isRailError(e) && (e.code === "UNSUPPORTED" || e.code === "UPSTREAM_AUTH")) throw e;
+          if (isRailError(e) && e.code === "RATE_LIMITED") {
+            // Without the direct route there is nothing to compare against; later refusals keep what was read.
+            if (essential) throw e;
+            if (!refused) refused = e;
+            reads.delete(key);
+            skipped.add(key);
+            return null;
+          }
           notes.push(`Could not read ${f}→${t} on ${d}: ${isRailError(e) ? e.message : String(e)}`);
           return null;
         }
       };
 
       const options: TravelOption[] = [];
-      const direct = await read(from, to, a.date);
+      const direct = await read(from, to, a.date, true);
       if (direct) options.push(...directOptions(direct.trains, classes, a.date));
 
       const alts = await Promise.all(
@@ -207,6 +229,11 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
                 first_leg_trains: await trainSet(origins, [hub], [a.date]),
                 onward_trains: await trainSet([hub], dests, [a.date, addDays(a.date, 1)]),
                 detour: detourRatio(pos.get(from) ?? null, pos.get(hub) ?? null, pos.get(to) ?? null),
+                km_from_ends: (() => {
+                  const h = pos.get(hub);
+                  const ends = [pos.get(from), pos.get(to)].filter((p): p is readonly [number, number] => p !== undefined);
+                  return h && ends.length === 2 ? Math.min(...ends.map((p) => haversineKm(p, h))) : null;
+                })(),
                 fastest_minutes: js[0]!.total_minutes,
               });
             }
@@ -259,7 +286,14 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
             }),
           );
           const usable = evaluated.filter((o): o is TravelOption => o !== null);
-          options.push(...usable);
+          // Journeys to different terminals of the destination city can read back as the same trains and classes.
+          const seenOptions = new Set<string>();
+          for (const o of usable) {
+            const key = o.legs.map((l) => `${l.train_number}|${l.date}|${l.class_code}|${l.from_code}|${l.to_code}`).join(">");
+            if (seenOptions.has(key)) continue;
+            seenOptions.add(key);
+            options.push(o);
+          }
           if (journeys.length > usable.length)
             notes.push(
               `${journeys.length - usable.length} of ${journeys.length} timetable connections had a leg with no listed, bookable class in the requested classes.`,
@@ -268,7 +302,13 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
         }
       }
 
-      const ranked = rankOptions(options, classes).slice(0, a.limit);
+      const ranked = rankOptions(a.omit_direct ? options.filter((o) => o.kind !== "direct") : options, classes).slice(0, a.limit);
+      if (refused) {
+        const why = (refused as RailError).message;
+        notes.unshift(
+          `${skipped.size} route${skipped.size === 1 ? " was" : "s were"} not read because the seat source refused further requests (${why}); the options shown come from the ${reads.size} route${reads.size === 1 ? "" : "s"} that were read.`,
+        );
+      }
       notes.push(
         "Availability is general quota, read live from the source; it changes minute to minute.",
         "Connections are planned on scheduled times; each leg is a separate ticket and a late first train can miss the second.",
@@ -283,6 +323,8 @@ export function registerPlannerTools(server: McpServer, ctx: AppContext): void {
           change_stations: changeStations,
         },
         lookups_used: reads.size,
+        incomplete: refused !== null,
+        routes_not_read: skipped.size,
         verification: VOLATILE,
         notes,
         source: providers[0] ? provenanceOf(providers[0].info) : null,

@@ -36,6 +36,8 @@ export interface HttpOptions {
   timeoutMs?: number;
   /** Retries for network errors, 5xx and 429 (with backoff). */
   retries?: number;
+  /** false: a 429 is thrown at once (with its Retry-After) instead of retried after a short backoff. Default true. */
+  retryOn429?: boolean;
   limiter?: RateLimiter;
   signal?: AbortSignal;
 }
@@ -102,10 +104,15 @@ export async function httpRequest(
       const retryAfter = Number(res.headers.get("retry-after")) || undefined;
       lastError =
         res.status === 429
-          ? new RailError("RATE_LIMITED", `${provider} rate limit or quota exceeded (HTTP 429)`, provider, retryAfter)
+          ? new RailError(
+              "RATE_LIMITED",
+              /quota/i.test(text) ? `${provider} quota exceeded (HTTP 429)` : `${provider} rate limit exceeded (HTTP 429)`,
+              provider,
+              retryAfter,
+            )
           : new RailError("UPSTREAM_UNAVAILABLE", `${provider} returned HTTP ${res.status}`, provider);
-      // Monthly-quota 429s won't clear with a retry.
-      if (res.status === 429 && /quota/i.test(text)) throw lastError;
+      // Monthly-quota 429s won't clear with a retry; some callers wait for Retry-After themselves.
+      if (res.status === 429 && (/quota/i.test(text) || opts.retryOn429 === false)) throw lastError;
       continue;
     }
     return { status: res.status, text, headers: res.headers };
